@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+
+# Xcode user data
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.moved-aside
+
+# Build artifacts
+.build/
+build/
+DerivedData/
+.DerivedData*/
+.module-cache/
+
+# Swift Package Manager
+.swiftpm/
+
+# Local environment files
+.env
+.env.*
+!.env.example

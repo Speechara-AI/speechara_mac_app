@@ -10,67 +10,6 @@ enum SubtitleStatus: String {
 
 enum SourceLanguageOption: String, CaseIterable, Identifiable {
     case english
-
-    var id: Self { self }
-
-    var displayName: String {
-        switch self {
-        case .english:
-            return "English"
-        }
-    }
-
-    var deepgramLanguageCode: String {
-        switch self {
-        case .english:
-            return "en"
-        }
-    }
-
-    var deepSeekLanguageName: String {
-        switch self {
-        case .english:
-            return "English"
-        }
-    }
-
-    var summarizeButtonTitle: String {
-        switch self {
-        case .english:
-            return "Summarize"
-        }
-    }
-
-    var answerButtonTitle: String {
-        switch self {
-        case .english:
-            return "Suggest answer"
-        }
-    }
-
-    var protocolButtonTitle: String {
-        switch self {
-        case .english:
-            return "Protocol"
-        }
-    }
-
-    var answerPanelTitle: String {
-        switch self {
-        case .english:
-            return "Suggested answer"
-        }
-    }
-
-    var protocolPanelTitle: String {
-        switch self {
-        case .english:
-            return "Meeting protocol"
-        }
-    }
-}
-
-enum TranslationLanguageOption: String, CaseIterable, Identifiable {
     case russian
     case german
     case spanish
@@ -79,20 +18,28 @@ enum TranslationLanguageOption: String, CaseIterable, Identifiable {
     var id: Self { self }
 
     var displayName: String {
+        SpeecharaLocalizationStore.shared.localizedLanguageName(for: matchingAppLanguage)
+    }
+
+    var deepgramLanguageCode: String {
         switch self {
+        case .english:
+            return "en"
         case .russian:
-            return "Russian"
+            return "ru"
         case .german:
-            return "German"
+            return "de"
         case .spanish:
-            return "Spanish"
+            return "es"
         case .french:
-            return "French"
+            return "fr"
         }
     }
 
-    var deepSeekTargetLanguageName: String {
+    var deepSeekLanguageName: String {
         switch self {
+        case .english:
+            return "English"
         case .russian:
             return "Russian"
         case .german:
@@ -105,67 +52,133 @@ enum TranslationLanguageOption: String, CaseIterable, Identifiable {
     }
 
     var summarizeButtonTitle: String {
-        switch self {
-        case .russian:
-            return "Резюме"
-        case .german:
-            return "Zusammenfassen"
-        case .spanish:
-            return "Resumir"
-        case .french:
-            return "Résumer"
-        }
+        SL("Summarize")
     }
 
     var answerButtonTitle: String {
-        switch self {
-        case .russian:
-            return "Подсказать ответ"
-        case .german:
-            return "Antwort vorschlagen"
-        case .spanish:
-            return "Sugerir respuesta"
-        case .french:
-            return "Suggérer une réponse"
-        }
+        SL("Suggest answer")
     }
 
     var protocolButtonTitle: String {
-        switch self {
-        case .russian:
-            return "Протокол"
-        case .german:
-            return "Protokoll"
-        case .spanish:
-            return "Protocolo"
-        case .french:
-            return "Protocole"
-        }
+        SL("Protocol")
     }
 
     var answerPanelTitle: String {
-        switch self {
-        case .russian:
-            return "Подсказка ответа"
-        case .german:
-            return "Antwortvorschlag"
-        case .spanish:
-            return "Respuesta sugerida"
-        case .french:
-            return "Réponse suggérée"
-        }
+        SL("Suggested answer")
     }
 
     var protocolPanelTitle: String {
+        SL("Meeting protocol")
+    }
+
+    private var matchingAppLanguage: SpeecharaAppLanguage {
         switch self {
+        case .english:
+            return .english
         case .russian:
-            return "Протокол встречи"
+            return .russian
         case .german:
-            return "Besprechungsprotokoll"
+            return .german
         case .spanish:
-            return "Protocolo de la reunion"
+            return .spanish
         case .french:
-            return "Protocole de reunion"
+            return .french
+        }
+    }
+}
+
+enum TranslationLanguageOption: String, CaseIterable, Identifiable {
+    case english
+    case russian
+    case german
+    case spanish
+    case french
+
+    var id: Self { self }
+
+    var displayName: String {
+        SpeecharaLocalizationStore.shared.localizedLanguageName(for: matchingAppLanguage)
+    }
+
+    var languageCode: String {
+        switch self {
+        case .english:
+            return "en"
+        case .russian:
+            return "ru"
+        case .german:
+            return "de"
+        case .spanish:
+            return "es"
+        case .french:
+            return "fr"
+        }
+    }
+
+    var deepSeekTargetLanguageName: String {
+        switch self {
+        case .english:
+            return "English"
+        case .russian:
+            return "Russian"
+        case .german:
+            return "German"
+        case .spanish:
+            return "Spanish"
+        case .french:
+            return "French"
+        }
+    }
+
+    var summarizeButtonTitle: String {
+        SL("Summarize")
+    }
+
+    var answerButtonTitle: String {
+        SL("Suggest answer")
+    }
+
+    var protocolButtonTitle: String {
+        SL("Protocol")
+    }
+
+    var answerPanelTitle: String {
+        SL("Suggested answer")
+    }
+
+    var protocolPanelTitle: String {
+        SL("Meeting protocol")
+    }
+
+    private var matchingAppLanguage: SpeecharaAppLanguage {
+        switch self {
+        case .english:
+            return .english
+        case .russian:
+            return .russian
+        case .german:
+            return .german
+        case .spanish:
+            return .spanish
+        case .french:
+            return .french
+        }
+    }
+}
+
+extension SourceLanguageOption {
+    var matchingTranslationLanguage: TranslationLanguageOption {
+        switch self {
+        case .english:
+            return .english
+        case .russian:
+            return .russian
+        case .german:
+            return .german
+        case .spanish:
+            return .spanish
+        case .french:
+            return .french
         }
     }
 }
@@ -251,7 +264,11 @@ final class SubtitleViewModel: ObservableObject {
     @Published var translatedText = ""
     @Published private(set) var transcriptEntries = [DialogueEntry]()
     @Published private(set) var translationEntries = [DialogueEntry]()
-    @Published var selectedSourceLanguage: SourceLanguageOption = .english
+    @Published var selectedSourceLanguage: SourceLanguageOption = .english {
+        didSet {
+            reconcileTranslationSelectionWithSourceLanguage()
+        }
+    }
     @Published var isAudioRecordingEnabled = false
     @Published var isTranslationEnabled = true
     @Published var selectedTranslationLanguage: TranslationLanguageOption = .russian
@@ -314,6 +331,8 @@ final class SubtitleViewModel: ObservableObject {
     private let deepSeekMeetingProtocolService = DeepSeekMeetingProtocolService()
     private let deepSeekAnswerAssistService = DeepSeekAnswerAssistService()
     private let meetingSessionHistoryService = MeetingSessionHistoryService()
+    private let billingService = SpeecharaBillingService()
+    private let speecharaAIProxyService = SpeecharaBackendProxyService()
     private var isTranslationAvailable = false
     private var isStreamingSessionPrepared = false
     private var isMicrophoneCaptureActive = false
@@ -338,6 +357,10 @@ final class SubtitleViewModel: ObservableObject {
     private var meetingHistorySource = "system_audio"
     private var focusModeEnabledForHistory = false
     private var meetingHistoryConversationGeneration = UUID()
+    private var billingUsageIntervalStartedAt: Date?
+    private var billingUsageEventSequence = 1
+    private var billingUsageSyncTask: Task<Void, Never>?
+    private var isReconcilingTranslationSelection = false
 
     private static let transcriptTimestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -361,7 +384,7 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     var liveSubtitleDescription: String {
-        liveSubtitlePreview.isEmpty ? "Waiting for speech..." : liveSubtitlePreview
+        liveSubtitlePreview.isEmpty ? SL("Waiting for speech...") : liveSubtitlePreview
     }
 
     var showsTranscriptDialogueMode: Bool {
@@ -389,19 +412,19 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     var sourceLanguageSummary: String {
-        "Input: \(selectedSourceLanguage.displayName)"
+        SLF("Input: %@", selectedSourceLanguage.displayName)
     }
 
     var recordingSummary: String {
-        isAudioRecordingEnabled ? "M4A: On" : "M4A: Off"
+        isAudioRecordingEnabled ? SL("M4A: On") : SL("M4A: Off")
     }
 
     var microphoneSummary: String {
-        isMicrophoneListening ? "Mic: On" : "Mic: Off"
+        isMicrophoneListening ? SL("Mic: On") : SL("Mic: Off")
     }
 
     var selectedMicrophoneName: String {
-        availableMicrophones.first(where: { $0.id == selectedMicrophoneID })?.name ?? "Default microphone"
+        availableMicrophones.first(where: { $0.id == selectedMicrophoneID })?.name ?? SL("Default microphone")
     }
 
     var hasAvailableMicrophones: Bool {
@@ -409,48 +432,54 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     var microphoneTestButtonTitle: String {
-        isMicrophoneTesting ? "Stop test" : "Start test"
+        isMicrophoneTesting ? SL("Stop test") : SL("Start test")
     }
 
     var microphoneTestDescription: String {
         if !hasAvailableMicrophones {
-            return "No microphone devices are available."
+            return SL("No microphone devices are available.")
         }
 
         if isMicrophoneTesting {
-            return microphoneSignalDetected ? "Signal detected. Keep speaking." : "Speak now. Waiting for signal..."
+            return microphoneSignalDetected ? SL("Signal detected. Keep speaking.") : SL("Speak now. Waiting for signal...")
         }
 
         if isMicrophoneListening {
-            return microphoneSignalDetected ? "Microphone signal is live." : "Microphone is on. Waiting for speech..."
+            return microphoneSignalDetected ? SL("Microphone signal is live.") : SL("Microphone is on. Waiting for speech...")
         }
 
-        return "Use Test to verify the selected microphone before adding it to the live transcript."
+        return SL("Use Test to verify the selected microphone before adding it to the live transcript.")
     }
 
     var translationSummary: String {
-        isTranslationEnabled ? "Translate to: \(selectedTranslationLanguage.displayName)" : "Translation: Off"
+        isTranslationEnabled ? SLF("Translate to: %@", selectedTranslationLanguage.displayName) : SL("Translation: Off")
+    }
+
+    var availableTranslationLanguages: [TranslationLanguageOption] {
+        TranslationLanguageOption.allCases.filter { language in
+            language != selectedSourceLanguage.matchingTranslationLanguage
+        }
     }
 
     var translationPanelTitle: String {
-        "\(selectedTranslationLanguage.displayName) translation"
+        SLF("%@ translation", selectedTranslationLanguage.displayName)
     }
 
     var assistantActivityText: String? {
         if isTranscriptProtocolLoading || isTranslationProtocolLoading {
-            return "Preparing protocol..."
+            return SL("Preparing protocol...")
         }
 
         if isTranscriptAnswerLoading || isTranslationAnswerLoading {
-            return "Suggesting answer..."
+            return SL("Suggesting answer...")
         }
 
         if isTranscriptSummaryLoading || isTranslationSummaryLoading {
-            return "Summarizing..."
+            return SL("Summarizing...")
         }
 
         if !liveTranslationPreview.isEmpty {
-            return "Translating..."
+            return SL("Translating...")
         }
 
         return nil
@@ -458,20 +487,20 @@ final class SubtitleViewModel: ObservableObject {
 
     var transcriptPlaceholderText: String {
         hasActiveSession
-            ? "Transcript is live. You can edit it at any time during testing."
-            : "Start listening or turn on the microphone to begin capturing transcript."
+            ? SL("Transcript is live. You can edit it at any time during testing.")
+            : SL("Start listening or turn on the microphone to begin capturing transcript.")
     }
 
     var translationPlaceholderText: String {
         if !isTranslationEnabled {
-            return "Translation is off for this session."
+            return SL("Translation is off for this session.")
         }
 
-        return "Translation will appear here as final transcript chunks arrive."
+        return SL("Translation will appear here as final transcript chunks arrive.")
     }
 
     var sourceAnswerPlaceholderText: String {
-        "Suggested answer will appear here after you ask the assistant for help with the latest question."
+        SL("Suggested answer will appear here after you ask the assistant for help with the latest question.")
     }
 
     var sourceSummaryButtonTitle: String {
@@ -499,7 +528,7 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     var sourceSummaryPanelTitle: String {
-        "Summary"
+        SL("Summary")
     }
 
     var sourceProtocolPanelTitle: String {
@@ -511,16 +540,7 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     var translationSummaryPanelTitle: String {
-        switch selectedTranslationLanguage {
-        case .russian:
-            return "Резюме"
-        case .german:
-            return "Zusammenfassung"
-        case .spanish:
-            return "Resumen"
-        case .french:
-            return "Résumé"
-        }
+        SL("Summary")
     }
 
     var translationAnswerPanelTitle: String {
@@ -529,6 +549,43 @@ final class SubtitleViewModel: ObservableObject {
 
     var translationProtocolPanelTitle: String {
         selectedTranslationLanguage.protocolPanelTitle
+    }
+
+    private func reconcileTranslationSelectionWithSourceLanguage() {
+        guard !isReconcilingTranslationSelection else {
+            return
+        }
+
+        guard selectedTranslationLanguage == selectedSourceLanguage.matchingTranslationLanguage else {
+            return
+        }
+
+        isReconcilingTranslationSelection = true
+
+        if let fallbackLanguage = availableTranslationLanguages.first {
+            selectedTranslationLanguage = fallbackLanguage
+        }
+
+        let shouldDisableTranslation = isTranslationEnabled
+        if shouldDisableTranslation {
+            isTranslationEnabled = false
+        }
+
+        isReconcilingTranslationSelection = false
+
+        guard shouldDisableTranslation else {
+            return
+        }
+
+        isTranslationAvailable = false
+        liveTranslationPreview = ""
+        translationPreviewTurnID = nil
+        translationMessage = "Live translation was turned off because the source and target languages cannot match."
+
+        let translationService = deepSeekTranslationService
+        Task {
+            await translationService.resetSession()
+        }
     }
 
     func speakerDisplayLabel(for speakerNumber: Int) -> String {
@@ -612,6 +669,7 @@ final class SubtitleViewModel: ObservableObject {
                 status = .listening
                 meetingHistoryStartedAt = meetingHistoryStartedAt ?? Date()
                 meetingHistorySource = includeMicrophone ? "system_audio+microphone" : "system_audio"
+                markBillingUsageStartedIfNeeded()
                 scheduleMeetingHistorySessionStartIfNeeded()
 
                 if includeMicrophone && !isMicrophoneListening {
@@ -1086,6 +1144,8 @@ final class SubtitleViewModel: ObservableObject {
         meetingHistoryLastCompletedSnapshotSignature = nil
         meetingHistorySource = "system_audio"
         meetingHistorySaveTask = nil
+        billingUsageIntervalStartedAt = nil
+        billingUsageEventSequence = 1
     }
 
     private func handleMeetingHistorySyncError(_ error: Error) {
@@ -1098,6 +1158,57 @@ final class SubtitleViewModel: ObservableObject {
         if errorMessage != message {
             errorMessage = message
         }
+    }
+
+    private var billingClientSessionID: String {
+        "speechara-macos-session-\(meetingHistoryConversationGeneration.uuidString.lowercased())"
+    }
+
+    private func markBillingUsageStartedIfNeeded() {
+        guard hasActiveAudioSource, billingUsageIntervalStartedAt == nil else {
+            return
+        }
+
+        billingUsageIntervalStartedAt = Date().roundedDownToSecond()
+    }
+
+    private func scheduleBillingUsageEventSyncIfNeeded() {
+        guard let usageEvent = makeBillingUsageEventIfNeeded() else {
+            return
+        }
+
+        let previousTask = billingUsageSyncTask
+        billingUsageSyncTask = Task { [billingService] in
+            _ = await previousTask?.result
+            _ = try? await billingService.reportUsageEvents([usageEvent])
+        }
+    }
+
+    private func makeBillingUsageEventIfNeeded() -> SpeecharaBillingUsageEvent? {
+        guard let startedAt = billingUsageIntervalStartedAt else {
+            return nil
+        }
+
+        let elapsedSeconds = max(0, Int(Date().timeIntervalSince(startedAt)))
+        billingUsageIntervalStartedAt = nil
+
+        guard elapsedSeconds > 0 else {
+            return nil
+        }
+
+        let endedAt = startedAt.addingTimeInterval(TimeInterval(elapsedSeconds))
+        let event = SpeecharaBillingUsageEvent(
+            eventId: "\(billingClientSessionID)-\(billingUsageEventSequence)",
+            meetingSessionId: meetingHistorySessionID,
+            clientSessionId: billingClientSessionID,
+            sourceApp: "macos",
+            usageType: "live_listening",
+            startedAt: startedAt.billingUsageTimestamp,
+            endedAt: endedAt.billingUsageTimestamp,
+            durationSeconds: elapsedSeconds
+        )
+        billingUsageEventSequence += 1
+        return event
     }
 
     func updateTranscriptText(_ text: String) {
@@ -1325,16 +1436,6 @@ final class SubtitleViewModel: ObservableObject {
         }
     }
 
-    private static func deepgramAPIKey() throws -> String {
-        guard let apiKey = AppSecretsStore.shared.resolvedValue(for: .deepgram)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !apiKey.isEmpty else {
-            throw DeepgramLiveTranscriptionError.missingAPIKey
-        }
-
-        return apiKey
-    }
-
     private func applyFinalTranscript(_ transcript: String, speechFinal: Bool) {
         let normalizedTranscript = normalizedTranscriptFragment(transcript)
         guard !normalizedTranscript.isEmpty else {
@@ -1501,10 +1602,10 @@ final class SubtitleViewModel: ObservableObject {
         }
 
         do {
-            let deepSeekAPIKey = try Self.deepSeekAPIKey()
             try await deepSeekTranslationService.startSession(
-                apiKey: deepSeekAPIKey,
+                sourceLanguageCode: selectedSourceLanguage.deepgramLanguageCode,
                 sourceLanguageName: selectedSourceLanguage.deepSeekLanguageName,
+                targetLanguageCode: selectedTranslationLanguage.languageCode,
                 targetLanguageName: selectedTranslationLanguage.deepSeekTargetLanguageName,
                 eventHandler: { [weak self] event in
                     Task { @MainActor in
@@ -1518,7 +1619,7 @@ final class SubtitleViewModel: ObservableObject {
             await deepSeekTranslationService.replaceHistory(with: translationHistoryTurns())
         } catch {
             isTranslationAvailable = false
-            translationMessage = "\(selectedTranslationLanguage.displayName) translation is unavailable: \(error.localizedDescription)"
+            translationMessage = SLF("%@ translation is unavailable: %@", selectedTranslationLanguage.displayName, error.localizedDescription)
             liveTranslationPreview = ""
         }
     }
@@ -1557,6 +1658,7 @@ final class SubtitleViewModel: ObservableObject {
         isMicrophoneTesting = false
         updateMicrophoneLiveHandler()
         status = .listening
+        markBillingUsageStartedIfNeeded()
         errorMessage = nil
     }
 
@@ -1581,7 +1683,6 @@ final class SubtitleViewModel: ObservableObject {
             return
         }
 
-        let deepgramAPIKey = try Self.deepgramAPIKey()
         refreshAvailableMicrophones()
 
         do {
@@ -1589,7 +1690,6 @@ final class SubtitleViewModel: ObservableObject {
             await mixedAudioStreamMixer.reset()
             await configureMixedAudioOutput()
             try await liveDeepgramService.connect(
-                apiKey: deepgramAPIKey,
                 sourceLanguageCode: selectedSourceLanguage.deepgramLanguageCode,
                 diarize: false,
                 utterances: true,
@@ -1726,6 +1826,7 @@ final class SubtitleViewModel: ObservableObject {
         pendingTranslationDrafts.removeAll()
         translationPreviewTurnID = nil
         lastDeepgramFinalTranscript = ""
+        scheduleBillingUsageEventSyncIfNeeded()
         status = markStopped ? .stopped : .idle
         scheduleDraftAutosave()
         if persistHistoryAsActive {
@@ -1789,23 +1890,13 @@ final class SubtitleViewModel: ObservableObject {
             }
             isTranslationAvailable = false
             liveTranslationPreview = ""
-            translationMessage = "\(selectedTranslationLanguage.displayName) translation was paused: \(message)"
+            translationMessage = SLF("%@ translation was paused: %@", selectedTranslationLanguage.displayName, message)
             rebuildPublishedState()
 
             Task {
                 await deepSeekTranslationService.resetSession()
             }
         }
-    }
-
-    private static func deepSeekAPIKey() throws -> String {
-        guard let apiKey = AppSecretsStore.shared.resolvedValue(for: .deepseek)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !apiKey.isEmpty else {
-            throw DeepSeekTranslationError.missingAPIKey
-        }
-
-        return apiKey
     }
 
     private func applyCompletedTranslationChunk(_ translation: String, to turnID: UUID) {
@@ -1828,7 +1919,7 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     private func speakerLabel(for speakerNumber: Int) -> String {
-        speakerNumberToLabel[speakerNumber] ?? "Speaker \(speakerNumber)"
+        speakerNumberToLabel[speakerNumber] ?? SLF("Speaker %@", String(speakerNumber))
     }
 
     private func renderText(from entries: [DialogueEntry], useDialogueLabels: Bool, includeTimestamps: Bool) -> String {
@@ -2113,8 +2204,6 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     private func reconstructStableTurns(_ turns: [SessionTurn]) async throws -> [SessionTurn] {
-        let apiKey = try Self.deepSeekAPIKey()
-
         let inputLines = turns.map { turn in
             let timestamp = Self.transcriptTimestampFormatter.string(from: turn.timestamp)
             if let speakerLabel = turn.speakerLabel, !speakerLabel.isEmpty {
@@ -2125,51 +2214,36 @@ final class SubtitleViewModel: ObservableObject {
         }
         let joinedInput = inputLines.joined(separator: "\n")
 
-        let request = DeepSeekStructuredDialogueRequest(
-            model: "deepseek-chat",
-            messages: [
-                DeepSeekStructuredDialogueMessage(
-                    role: "system",
-                    content: """
-                    Reconstruct clean readable dialogue from raw live STT.
-                    Fix only obvious transcription mistakes, restore phrase boundaries, and split speakers when there is high confidence.
-                    Preserve chronology and preserve timestamps from the input lines.
-                    Return ONLY valid JSON in this exact shape:
-                    [{"timestamp":"HH:mm:ss","speaker":"optional label or empty string","text":"clean text"}]
-                    No markdown, no explanations, no code fences.
-                    """
-                ),
-                DeepSeekStructuredDialogueMessage(
-                    role: "user",
-                    content: """
-                    Reconstruct this stable dialogue window:
+        let completion = try await speecharaAIProxyService.performChatCompletion(
+            SpeecharaChatCompletionRequest(
+                model: "deepseek-chat",
+                messages: [
+                    SpeecharaChatMessage(
+                        role: "system",
+                        content: """
+                        Reconstruct clean readable dialogue from raw live STT.
+                        Fix only obvious transcription mistakes, restore phrase boundaries, and split speakers when there is high confidence.
+                        Preserve chronology and preserve timestamps from the input lines.
+                        Return ONLY valid JSON in this exact shape:
+                        [{"timestamp":"HH:mm:ss","speaker":"optional label or empty string","text":"clean text"}]
+                        No markdown, no explanations, no code fences.
+                        """
+                    ),
+                    SpeecharaChatMessage(
+                        role: "user",
+                        content: """
+                        Reconstruct this stable dialogue window:
 
-                    \(joinedInput)
-                    """
-                ),
-            ],
-            temperature: 0,
-            maxTokens: 900,
-            stream: false
+                        \(joinedInput)
+                        """
+                    ),
+                ],
+                temperature: 0,
+                maxTokens: 900,
+                stream: false
+            )
         )
 
-        guard let url = URL(string: "https://api.deepseek.com/chat/completions") else {
-            return turns
-        }
-
-        var urlRequest = URLRequest(url: url)
-        urlRequest.httpMethod = "POST"
-        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
-        urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        urlRequest.httpBody = try JSONEncoder().encode(request)
-
-        let (data, response) = try await URLSession.shared.data(for: urlRequest)
-        guard let httpResponse = response as? HTTPURLResponse, (200 ... 299).contains(httpResponse.statusCode) else {
-            return turns
-        }
-
-        let completion = try JSONDecoder().decode(DeepSeekStructuredDialogueResponse.self, from: data)
         guard let content = completion.choices.first?.message.content?.trimmingCharacters(in: .whitespacesAndNewlines),
               !content.isEmpty else {
             return turns
@@ -2534,9 +2608,7 @@ final class SubtitleViewModel: ObservableObject {
             }
 
             do {
-                let apiKey = try Self.deepSeekAPIKey()
                 let summary = try await deepSeekSummaryService.summarize(
-                    apiKey: apiKey,
                     transcript: trimmedTranscript,
                     inputLanguageName: inputLanguageName,
                     outputLanguageName: outputLanguageName
@@ -2612,9 +2684,7 @@ final class SubtitleViewModel: ObservableObject {
             }
 
             do {
-                let apiKey = try Self.deepSeekAPIKey()
                 let protocolText = try await deepSeekMeetingProtocolService.generateProtocol(
-                    apiKey: apiKey,
                     transcript: trimmedTranscript,
                     languageName: languageName
                 )
@@ -2691,9 +2761,7 @@ final class SubtitleViewModel: ObservableObject {
             }
 
             do {
-                let apiKey = try Self.deepSeekAPIKey()
                 let answer = try await deepSeekAnswerAssistService.suggestAnswer(
-                    apiKey: apiKey,
                     transcript: trimmedTranscript,
                     inputLanguageName: inputLanguageName,
                     outputLanguageName: outputLanguageName
@@ -2737,43 +2805,26 @@ private enum AnswerAssistTarget {
     case translation
 }
 
-private struct DeepSeekStructuredDialogueRequest: Encodable {
-    let model: String
-    let messages: [DeepSeekStructuredDialogueMessage]
-    let temperature: Double
-    let maxTokens: Int
-    let stream: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case model
-        case messages
-        case temperature
-        case maxTokens = "max_tokens"
-        case stream
-    }
-}
-
-private struct DeepSeekStructuredDialogueMessage: Codable {
-    let role: String
-    let content: String
-}
-
-private struct DeepSeekStructuredDialogueResponse: Decodable {
-    let choices: [DeepSeekStructuredDialogueChoice]
-}
-
-private struct DeepSeekStructuredDialogueChoice: Decodable {
-    let message: DeepSeekStructuredDialogueChoiceMessage
-}
-
-private struct DeepSeekStructuredDialogueChoiceMessage: Decodable {
-    let content: String?
-}
-
 private struct StructuredDialogueLine: Decodable {
     let timestamp: String
     let speaker: String?
     let text: String
+}
+
+private extension Date {
+    var billingUsageTimestamp: String {
+        Self.billingUsageFormatter.string(from: self)
+    }
+
+    func roundedDownToSecond() -> Date {
+        Date(timeIntervalSince1970: floor(timeIntervalSince1970))
+    }
+
+    private static let billingUsageFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
 }
 
 private extension String {

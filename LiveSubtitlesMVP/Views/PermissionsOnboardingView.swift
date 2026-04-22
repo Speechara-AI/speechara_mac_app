@@ -18,7 +18,7 @@ struct SpeecharaRootView: View {
                     permissionsOnboardingVersion = speecharaPermissionsOnboardingVersion
                 }
             } else {
-                ContentView()
+                SpeecharaWorkspaceShellView()
             }
         }
     }
@@ -296,43 +296,43 @@ private struct PermissionsOnboardingView: View {
 
     private var progressTitle: String {
         let percent = Int((permissionsController.completionProgress * 100).rounded())
-        return "Setup \(percent)%"
+        return SLF("Setup %@%%", String(percent))
     }
 
     private var readinessTitle: String {
         if permissionsController.shouldSuggestRelaunch {
-            return "Restart required"
+            return SL("Restart required")
         }
 
         if permissionsController.allRequiredPermissionsGranted {
-            return "Ready to listen"
+            return SL("Ready to listen")
         }
 
-        return "Permission setup"
+        return SL("Permission setup")
     }
 
     private var readinessSubtitle: String {
         if permissionsController.shouldSuggestRelaunch {
-            return "Speechara has everything it needs, but screen capture only becomes active after a relaunch."
+            return SL("Speechara has everything it needs, but screen capture only becomes active after a relaunch.")
         }
 
         if permissionsController.allRequiredPermissionsGranted {
-            return "Both macOS permissions are active in this launch."
+            return SL("Both macOS permissions are active in this launch.")
         }
 
-        return "Finish the two access checks and the main capture flow will be ready."
+        return SL("Finish the two access checks and the main capture flow will be ready.")
     }
 
     private var readinessDetail: String {
         if permissionsController.shouldSuggestRelaunch {
-            return "Use Quit and reopen below. On the next launch Speechara will enter the main workspace with capture ready."
+            return SL("Use Quit and reopen below. On the next launch Speechara will enter the main workspace with capture ready.")
         }
 
         if permissionsController.allRequiredPermissionsGranted {
-            return "You can continue straight into the app and start a listening session without additional permission prompts."
+            return SL("You can continue straight into the app and start a listening session without additional permission prompts.")
         }
 
-        return "Speechara asks only for the permissions that directly power the current product: microphone input and screen plus system audio capture."
+        return SL("Speechara asks only for the permissions that directly power the current product: microphone input and screen plus system audio capture.")
     }
 
     private var readinessTint: Color {
@@ -362,11 +362,11 @@ private struct PermissionsOnboardingView: View {
     private var microphoneStatusTitle: String {
         switch permissionsController.microphoneState {
         case .notDetermined:
-            return "Not requested"
+            return SL("Not requested")
         case .denied:
-            return "Needs attention"
+            return SL("Needs attention")
         case .granted:
-            return "Granted"
+            return SL("Granted")
         }
     }
 
@@ -384,11 +384,11 @@ private struct PermissionsOnboardingView: View {
     private var microphoneActionTitle: String {
         switch permissionsController.microphoneState {
         case .notDetermined:
-            return "Allow access"
+            return SL("Allow access")
         case .denied:
-            return "Open settings"
+            return SL("Open settings")
         case .granted:
-            return "Allowed"
+            return SL("Allowed")
         }
     }
 
@@ -406,22 +406,22 @@ private struct PermissionsOnboardingView: View {
     private var microphoneHelpText: String {
         switch permissionsController.microphoneState {
         case .notDetermined:
-            return "Speechara will ask macOS for microphone access the first time."
+            return SL("Speechara will ask macOS for microphone access the first time.")
         case .denied:
-            return "If you previously denied access, turn it back on in System Settings and return here."
+            return SL("If you previously denied access, turn it back on in System Settings and return here.")
         case .granted:
-            return "Microphone input is active for this launch."
+            return SL("Microphone input is active for this launch.")
         }
     }
 
     private var screenStatusTitle: String {
         switch permissionsController.screenCaptureState {
         case .needsApproval:
-            return "Not approved"
+            return SL("Not approved")
         case .restartRequired:
-            return "Restart needed"
+            return SL("Restart needed")
         case .granted:
-            return "Granted"
+            return SL("Granted")
         }
     }
 
@@ -439,11 +439,11 @@ private struct PermissionsOnboardingView: View {
     private var screenActionTitle: String {
         switch permissionsController.screenCaptureState {
         case .needsApproval:
-            return "Allow access"
+            return SL("Allow access")
         case .restartRequired:
-            return "Approved"
+            return SL("Approved")
         case .granted:
-            return "Allowed"
+            return SL("Allowed")
         }
     }
 
@@ -461,24 +461,24 @@ private struct PermissionsOnboardingView: View {
     private var screenHelpText: String {
         switch permissionsController.screenCaptureState {
         case .needsApproval:
-            return "macOS may show a one-time prompt and ask you to reopen Speechara after approval."
+            return SL("macOS may show a one-time prompt and ask you to reopen Speechara after approval.")
         case .restartRequired:
-            return "The permission is approved. One relaunch remains before system audio capture becomes active."
+            return SL("The permission is approved. One relaunch remains before system audio capture becomes active.")
         case .granted:
-            return "Screen and system audio capture are ready in this launch."
+            return SL("Screen and system audio capture are ready in this launch.")
         }
     }
 
     private var primaryActionTitle: String {
         if permissionsController.shouldSuggestRelaunch {
-            return "Quit and reopen"
+            return SL("Quit and reopen")
         }
 
         if permissionsController.allRequiredPermissionsGranted {
-            return "Open Speechara"
+            return SL("Open Speechara")
         }
 
-        return "Grant access to continue"
+        return SL("Grant access to continue")
     }
 
     private var primaryActionIcon: String {
@@ -582,7 +582,7 @@ private struct PermissionAccessCard: View {
 
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 10) {
-                        Text(title)
+                        Text(SL(title))
                             .font(.title3.weight(.bold))
 
                         SetupStatusBadge(
@@ -592,7 +592,7 @@ private struct PermissionAccessCard: View {
                         )
                     }
 
-                    Text(subtitle)
+                    Text(SL(subtitle))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -611,7 +611,7 @@ private struct PermissionAccessCard: View {
                                 .font(.system(size: 13, weight: .bold))
                         }
 
-                        Text(actionTitle)
+                        Text(SL(actionTitle))
                             .font(.system(size: 14, weight: .semibold, design: .rounded))
                     }
                     .foregroundStyle(isActionEnabled ? .white : .secondary)
@@ -625,7 +625,7 @@ private struct PermissionAccessCard: View {
                 .buttonStyle(.plain)
                 .disabled(!isActionEnabled)
 
-                Text(helpText)
+                Text(SL(helpText))
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -739,10 +739,10 @@ private struct BenefitRow: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(title)
+                Text(SL(title))
                     .font(.system(size: 15, weight: .bold, design: .rounded))
 
-                Text(subtitle)
+                Text(SL(subtitle))
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -763,10 +763,10 @@ private struct StepRow: View {
                 .foregroundStyle(isComplete ? Color(red: 0.10, green: 0.62, blue: 0.45) : .secondary)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(title)
+                Text(SL(title))
                     .font(.system(size: 15, weight: .bold, design: .rounded))
 
-                Text(subtitle)
+                Text(SL(subtitle))
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -801,7 +801,7 @@ private struct SetupProgressBadge: View {
                     .frame(width: max(12, 104 * progress), height: 10)
             }
 
-            Text(title)
+            Text(SL(title))
                 .font(.system(size: 13, weight: .bold, design: .rounded))
                 .foregroundStyle(.secondary)
         }
@@ -842,7 +842,7 @@ private struct SetupAlertStrip: View {
             Image(systemName: iconName)
                 .font(.system(size: 16, weight: .semibold))
 
-            Text(text)
+            Text(SL(text))
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -901,7 +901,7 @@ private struct PermissionPrimaryButton: View {
                 Image(systemName: iconName)
                     .font(.system(size: 16, weight: .bold))
 
-                Text(title)
+                Text(SL(title))
                     .font(.system(size: 17, weight: .bold, design: .rounded))
             }
             .foregroundStyle(.white.opacity(isEnabled ? 1 : 0.72))

@@ -3,13 +3,10 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var viewModel = SubtitleViewModel()
-    @EnvironmentObject private var authStore: AuthSessionStore
     @AppStorage("speechara.focusModeEnabled") private var isFocusModeEnabled = false
     @AppStorage("speechara.livePreviewVisible") private var isLivePreviewVisible = true
     @State private var isListeningSetupPresented = false
     @State private var shouldStartListeningAfterSetup = false
-    @State private var isMicrophonePopoverPresented = false
-    @State private var isAccountPopoverPresented = false
 
     var body: some View {
         GeometryReader { _ in
@@ -37,9 +34,11 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-                assistantColumn
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 220)
+                if viewModel.isTranscriptAnswerVisible {
+                    assistantColumn
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 220)
+                }
             }
             .padding(24)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -113,14 +112,13 @@ struct ContentView: View {
                     ) {
                         isFocusModeEnabled.toggle()
                     }
-
-                    accountMenu
                 }
 
                 if !isFocusModeEnabled {
                     HStack(alignment: .center, spacing: 12) {
                         PrimaryActionButton(
                             title: primaryActionTitle,
+                            subtitle: viewModel.isSystemAudioListening ? nil : "system audio",
                             systemImage: primaryActionIcon,
                             tint: primaryActionTint,
                             action: handlePrimaryAction
@@ -129,64 +127,26 @@ struct ContentView: View {
                         .opacity(primaryActionDisabled ? 0.55 : 1)
 
                         MicrophoneControl(
-                            viewModel: viewModel,
-                            isPopoverPresented: $isMicrophonePopoverPresented
+                            viewModel: viewModel
                         )
 
-                        Spacer()
+                        if showsSessionToolbarControls {
+                            settingsStrip
+
+                            Spacer()
+
+                            savedAudioStrip
+                        } else {
+                            Spacer()
+                        }
                     }
                 }
             }
         }
     }
 
-    @ViewBuilder
-    private var accountMenu: some View {
-        if let user = authStore.currentUser {
-            Button {
-                isAccountPopoverPresented.toggle()
-            } label: {
-                UserAccountBadge(
-                    initials: user.initials,
-                    avatarURL: user.avatarURL,
-                    displayName: user.displayName
-                )
-            }
-            .buttonStyle(.plain)
-            .help("Signed in as \(user.email)")
-            .popover(isPresented: $isAccountPopoverPresented, arrowEdge: .top) {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack(spacing: 12) {
-                        UserAccountBadge(
-                            initials: user.initials,
-                            avatarURL: user.avatarURL,
-                            displayName: user.displayName
-                        )
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(user.displayName)
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(.primary)
-
-                            Text(user.email)
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                        }
-                    }
-
-                    Divider()
-
-                    Button("Sign out") {
-                        isAccountPopoverPresented = false
-                        authStore.signOut()
-                    }
-                    .buttonStyle(.borderless)
-                }
-                .padding(14)
-                .frame(width: 240, alignment: .leading)
-            }
-        }
+    private var showsSessionToolbarControls: Bool {
+        viewModel.status == .listening || viewModel.status == .stopped
     }
 
     private var savedAudioStrip: some View {
@@ -211,7 +171,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .help("Show saved recording in Finder")
+                .help(SL("Show saved recording in Finder"))
             }
         }
         .padding(.horizontal, 14)
@@ -275,7 +235,7 @@ struct ContentView: View {
 
                 Divider()
 
-                ForEach(TranslationLanguageOption.allCases) { language in
+                ForEach(viewModel.availableTranslationLanguages) { language in
                     Button(language.displayName) {
                         viewModel.isTranslationEnabled = true
                         viewModel.selectedTranslationLanguage = language
@@ -311,7 +271,7 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
-                    .help("Hide live transcript preview")
+                    .help(SL("Hide live transcript preview"))
                 }
 
                 Text(viewModel.liveSubtitleDescription)
@@ -333,7 +293,7 @@ struct ContentView: View {
                 HStack(alignment: .center, spacing: 10) {
                     Text("Live transcript")
                         .font(.title3.weight(.bold))
-                        .help("Editable during testing, with timestamped blocks.")
+                        .help(SL("Editable during testing, with timestamped blocks."))
 
                     Spacer()
 
@@ -361,7 +321,8 @@ struct ContentView: View {
                         title: viewModel.sourceAnswerButtonTitle,
                         isEnabled: viewModel.canSuggestSourceAnswer,
                         action: viewModel.suggestSourceAnswer,
-                        helpText: "Draft a suggested reply to the latest question in this transcript."
+                        helpText: "Draft a suggested reply to the latest question in this transcript.",
+                        accentColor: Color(red: 0.22, green: 0.46, blue: 0.96)
                     )
                 }
 
@@ -429,7 +390,7 @@ struct ContentView: View {
                     Label("Suggested response", systemImage: "sparkles")
                         .font(.title3.weight(.bold))
                         .foregroundStyle(Color(red: 0.92, green: 0.64, blue: 0.12))
-                        .help("Looks at the latest transcript and suggests a natural response you can say on the call.")
+                        .help(SL("Looks at the latest transcript and suggests a natural response you can say on the call."))
 
                     Spacer()
 
@@ -447,13 +408,6 @@ struct ContentView: View {
                         .buttonStyle(.borderless)
                     }
                 }
-
-                PanelActionButton(
-                    title: viewModel.sourceAnswerButtonTitle,
-                    isEnabled: viewModel.canSuggestSourceAnswer,
-                    action: viewModel.suggestSourceAnswer,
-                    helpText: "Draft a suggested reply to the latest question in this transcript."
-                )
 
                 SmartAssistantPanel(
                     contentText: viewModel.transcriptAnswerText,
@@ -473,7 +427,7 @@ struct ContentView: View {
                 HStack(spacing: 10) {
                     Text(viewModel.translationPanelTitle)
                         .font(.title3.weight(.bold))
-                        .help("The translation stays secondary to the live transcript and fills in only when final text is ready.")
+                        .help(SL("The translation stays secondary to the live transcript and fills in only when final text is ready."))
 
                     Spacer()
 
@@ -497,12 +451,6 @@ struct ContentView: View {
                         helpText: "Create a full structured meeting protocol in the selected translation language."
                     )
 
-                    PanelActionButton(
-                        title: viewModel.translationAnswerButtonTitle,
-                        isEnabled: viewModel.canSuggestTranslationAnswer,
-                        action: viewModel.suggestTranslatedAnswer,
-                        helpText: "Draft a suggested reply in the selected translation language."
-                    )
                 }
 
                 if viewModel.isTranslationSummaryVisible {
@@ -606,26 +554,26 @@ struct ContentView: View {
 
     private var primaryStatusTitle: String {
         if viewModel.isBusy {
-            return "Preparing session"
+            return SL("Preparing session")
         }
 
         if viewModel.isSystemAudioListening && viewModel.isMicrophoneListening {
-            return "System + microphone live"
+            return SL("System + microphone live")
         }
 
         if viewModel.isSystemAudioListening {
-            return "Live listening"
+            return SL("Live listening")
         }
 
         if viewModel.isMicrophoneListening {
-            return "Microphone live"
+            return SL("Microphone live")
         }
 
         if viewModel.status == .stopped {
-            return "Listening stopped"
+            return SL("Listening stopped")
         }
 
-        return "Ready to listen"
+        return SL("Ready to listen")
     }
 
     private var primaryStatusIcon: String {
@@ -661,7 +609,7 @@ struct ContentView: View {
     }
 
     private var primaryActionTitle: String {
-        viewModel.isSystemAudioListening ? "Stop Listening" : "Start Listening"
+        viewModel.isSystemAudioListening ? SL("Stop Listening") : SL("Start Listening")
     }
 
     private var primaryActionIcon: String {
@@ -898,7 +846,7 @@ private struct EmptyPanelPlaceholder: View {
     var body: some View {
         VStack {
             Spacer(minLength: 0)
-            Text(text)
+            Text(SL(text))
                 .font(.system(.body, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -1045,7 +993,7 @@ private struct FontSizeControls: View {
             }
             .buttonStyle(.borderless)
             .disabled(!canDecrease)
-            .help("Decrease text size")
+            .help(SL("Decrease text size"))
 
             Button(action: onIncrease) {
                 Image(systemName: "textformat.size.larger")
@@ -1054,7 +1002,7 @@ private struct FontSizeControls: View {
             }
             .buttonStyle(.borderless)
             .disabled(!canIncrease)
-            .help("Increase text size")
+            .help(SL("Increase text size"))
         }
         .foregroundStyle(.secondary)
     }
@@ -1065,13 +1013,24 @@ private struct PanelActionButton: View {
     let isEnabled: Bool
     let action: () -> Void
     let helpText: String
+    var accentColor: Color? = nil
 
+    @ViewBuilder
     var body: some View {
-        Button(title, action: action)
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(!isEnabled)
-            .help(helpText)
+        if let accentColor {
+            Button(SL(title), action: action)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .tint(accentColor)
+                .disabled(!isEnabled)
+                .help(SL(helpText))
+        } else {
+            Button(SL(title), action: action)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!isEnabled)
+                .help(SL(helpText))
+        }
     }
 }
 
@@ -1103,12 +1062,12 @@ private struct ResultPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                Text(title)
+                Text(SL(title))
                     .font(.headline)
 
                 Spacer()
 
-                Button("Copy", action: copyAction)
+                Button(SL("Copy"), action: copyAction)
                     .buttonStyle(.borderless)
                     .disabled(contentText.isEmpty || isLoading)
 
@@ -1117,14 +1076,14 @@ private struct ResultPanel: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.borderless)
-                .help("Hide panel")
+                .help(SL("Hide panel"))
             }
 
             Group {
                 if isLoading {
                     VStack(alignment: .leading, spacing: 10) {
                         ProgressView()
-                        Text(loadingText)
+                        Text(SL(loadingText))
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1172,7 +1131,7 @@ private struct SmartAssistantPanel: View {
             if isLoading {
                 VStack(alignment: .leading, spacing: 12) {
                     ProgressView()
-                    Text(loadingText)
+                    Text(SL(loadingText))
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1209,7 +1168,7 @@ private struct SessionBadge: View {
     let text: String
 
     var body: some View {
-        Label(text, systemImage: systemImage)
+        Label(SL(text), systemImage: systemImage)
             .font(.system(.caption, design: .rounded))
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -1227,7 +1186,7 @@ private struct LiveStatusPill: View {
     let tint: Color
 
     var body: some View {
-        Label(title, systemImage: systemImage)
+        Label(SL(title), systemImage: systemImage)
             .font(.system(size: 12, weight: .semibold, design: .rounded))
             .padding(.horizontal, 14)
             .frame(height: ToolbarMetrics.badgeHeight)
@@ -1240,92 +1199,6 @@ private struct LiveStatusPill: View {
                     .stroke(tint.opacity(0.10), lineWidth: 1)
             )
             .foregroundStyle(tint)
-    }
-}
-
-private struct UserAccountBadge: View {
-    let initials: String
-    let avatarURL: String?
-    let displayName: String
-
-    private let avatarSize: CGFloat = 28
-    private let outerSize: CGFloat = 32
-
-    private var resolvedAvatarURL: URL? {
-        guard let avatarURL = avatarURL?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !avatarURL.isEmpty else {
-            return nil
-        }
-
-        return URL(string: avatarURL)
-    }
-
-    @ViewBuilder
-    private var avatarContent: some View {
-        if let resolvedAvatarURL {
-            AsyncImage(url: resolvedAvatarURL) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: avatarSize, height: avatarSize)
-                        .clipped()
-                default:
-                    initialsFallback
-                }
-            }
-            .frame(width: avatarSize, height: avatarSize)
-            .clipShape(Circle())
-        } else {
-            initialsFallback
-        }
-    }
-
-    private var initialsFallback: some View {
-        Text(initials.isEmpty ? "?" : initials)
-            .font(.system(size: 11, weight: .bold, design: .rounded))
-            .foregroundStyle(.white)
-            .frame(width: avatarSize, height: avatarSize)
-            .background(
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.91, green: 0.23, blue: 0.18),
-                        Color(red: 0.25, green: 0.45, blue: 0.95),
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
-    }
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(Color.white.opacity(0.38))
-                .frame(width: outerSize, height: outerSize)
-
-            avatarContent
-                .frame(width: avatarSize, height: avatarSize)
-                .clipShape(Circle())
-        }
-        .frame(width: outerSize, height: outerSize)
-        .overlay(
-            Circle()
-                .stroke(Color.white.opacity(0.9), lineWidth: 1.3)
-                .frame(width: avatarSize, height: avatarSize)
-        )
-        .overlay(
-            Circle()
-                .stroke(Color.black.opacity(0.08), lineWidth: 1)
-                .frame(width: outerSize, height: outerSize)
-        )
-        .shadow(color: Color.black.opacity(0.12), radius: 6, x: 0, y: 2)
-        .clipped()
-        .contentShape(Circle())
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Account menu for \(displayName)")
     }
 }
 
@@ -1344,12 +1217,12 @@ private struct SettingStripPill: View {
                 .frame(width: 16)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(title)
+                Text(SL(title))
                     .font(.system(size: 10, weight: .bold, design: .rounded))
                     .textCase(.uppercase)
                     .tracking(0.4)
                     .foregroundStyle(.secondary)
-                Text(value)
+                Text(SL(value))
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .foregroundStyle(.primary)
             }
@@ -1386,7 +1259,7 @@ private struct ToolbarSecondaryButton: View {
                 Image(systemName: systemImage)
                     .font(.system(size: 13, weight: .semibold))
 
-                Text(title)
+                Text(SL(title))
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
             }
             .foregroundStyle(isActive ? Color.primary : Color.secondary)
@@ -1413,7 +1286,7 @@ private struct InlineStatusMessage: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
-            Text(text)
+            Text(SL(text))
                 .font(.subheadline)
         }
         .foregroundStyle(tint)
@@ -1428,6 +1301,7 @@ private struct InlineStatusMessage: View {
 
 private struct PrimaryActionButton: View {
     let title: String
+    let subtitle: String?
     let systemImage: String
     let tint: Color
     let action: () -> Void
@@ -1438,8 +1312,17 @@ private struct PrimaryActionButton: View {
                 Image(systemName: systemImage)
                     .font(.system(size: 17, weight: .bold))
 
-                Text(title)
-                    .font(.system(size: 17, weight: .bold, design: .rounded))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(SL(title))
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+
+                    if let subtitle {
+                        Text(SL(subtitle))
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.82))
+                    }
+                }
+                .multilineTextAlignment(.leading)
             }
             .foregroundStyle(.white)
             .padding(.horizontal, 24)
@@ -1526,74 +1409,79 @@ private enum ToolbarMetrics {
 
 private struct MicrophoneControl: View {
     @ObservedObject var viewModel: SubtitleViewModel
-    @Binding var isPopoverPresented: Bool
 
     var body: some View {
-        HStack(spacing: 8) {
-            Button {
-                viewModel.toggleMicrophoneCapture()
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: viewModel.isMicrophoneListening ? "mic.fill" : "mic.slash.fill")
-                        .font(.system(size: 14, weight: .semibold))
+        Button {
+            viewModel.toggleMicrophoneCapture()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: viewModel.isMicrophoneListening ? "mic.fill" : "mic.slash.fill")
+                    .font(.system(size: 14, weight: .semibold))
 
-                    Text(viewModel.isMicrophoneListening ? "Mic On" : "Mic Off")
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                Text(SLF("Mic: %@", viewModel.selectedMicrophoneName))
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
 
-                    MicrophoneLevelBars(
-                        level: viewModel.microphoneLevel,
-                        isActive: viewModel.isMicrophoneListening || viewModel.isMicrophoneTesting
+                MicrophoneLevelBars(
+                    level: viewModel.microphoneLevel,
+                    isActive: viewModel.isMicrophoneListening || viewModel.isMicrophoneTesting
+                )
+            }
+            .foregroundStyle(viewModel.isMicrophoneListening ? .white : .primary)
+            .padding(.horizontal, 14)
+            .frame(height: ToolbarMetrics.controlHeight)
+            .background(
+                RoundedRectangle(cornerRadius: ToolbarMetrics.cornerRadius)
+                    .fill(
+                        viewModel.isMicrophoneListening
+                            ? Color(red: 0.84, green: 0.16, blue: 0.17)
+                            : Color.white.opacity(0.58)
                     )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: ToolbarMetrics.cornerRadius)
+                    .stroke(
+                        viewModel.isMicrophoneListening
+                            ? Color.red.opacity(0.18)
+                            : Color.black.opacity(0.06),
+                        lineWidth: 1
+                    )
+            )
+            .shadow(color: Color.black.opacity(0.04), radius: 10, x: 0, y: 4)
+        }
+        .buttonStyle(.plain)
+        .help(
+            viewModel.isMicrophoneListening
+                ? SL("Turn microphone off. Right-click to choose a microphone.")
+                : SL("Turn microphone on. Right-click to choose a microphone.")
+        )
+        .disabled(viewModel.isBusy || viewModel.isMicrophoneBusy)
+        .contextMenu {
+            if viewModel.hasAvailableMicrophones {
+                ForEach(viewModel.availableMicrophones) { device in
+                    Button {
+                        viewModel.selectMicrophone(device.id)
+                    } label: {
+                        if device.id == viewModel.selectedMicrophoneID {
+                            Label(device.name, systemImage: "checkmark")
+                        } else {
+                            Text(device.name)
+                        }
+                    }
+                    .disabled(device.id == viewModel.selectedMicrophoneID)
                 }
-                .foregroundStyle(viewModel.isMicrophoneListening ? .white : .primary)
-                .padding(.horizontal, 14)
-                .frame(height: ToolbarMetrics.controlHeight)
-                .background(
-                    RoundedRectangle(cornerRadius: ToolbarMetrics.cornerRadius)
-                        .fill(
-                            viewModel.isMicrophoneListening
-                                ? Color(red: 0.84, green: 0.16, blue: 0.17)
-                                : Color.white.opacity(0.58)
-                        )
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: ToolbarMetrics.cornerRadius)
-                        .stroke(
-                            viewModel.isMicrophoneListening
-                                ? Color.red.opacity(0.18)
-                                : Color.black.opacity(0.06),
-                            lineWidth: 1
-                        )
-                )
-                .shadow(color: Color.black.opacity(0.04), radius: 10, x: 0, y: 4)
+            } else {
+                Button(SL("No microphone devices available")) {}
+                    .disabled(true)
             }
-            .buttonStyle(.plain)
-            .help(viewModel.isMicrophoneListening ? "Turn microphone off" : "Turn microphone on")
-            .disabled(viewModel.isBusy || viewModel.isMicrophoneBusy)
 
-            Button {
-                isPopoverPresented.toggle()
-            } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 40, height: ToolbarMetrics.controlHeight)
-                    .background(
-                        RoundedRectangle(cornerRadius: ToolbarMetrics.cornerRadius)
-                            .fill(Color.white.opacity(0.58))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: ToolbarMetrics.cornerRadius)
-                            .stroke(Color.black.opacity(0.06), lineWidth: 1)
-                    )
-                    .shadow(color: Color.black.opacity(0.04), radius: 10, x: 0, y: 4)
+            Divider()
+
+            Button(viewModel.microphoneTestButtonTitle) {
+                viewModel.toggleMicrophoneTest()
             }
-            .buttonStyle(.plain)
-            .help("Microphone options")
-            .disabled(viewModel.isBusy)
-            .popover(isPresented: $isPopoverPresented, arrowEdge: .bottom) {
-                MicrophoneOptionsPopover(viewModel: viewModel)
-            }
+            .disabled(viewModel.isBusy || viewModel.isMicrophoneBusy || !viewModel.hasAvailableMicrophones)
         }
     }
 }
@@ -1622,111 +1510,6 @@ private struct MicrophoneLevelBars: View {
         return level >= threshold
             ? Color(red: 0.20, green: 0.78, blue: 0.41)
             : Color.white.opacity(0.35)
-    }
-}
-
-private struct MicrophoneOptionsPopover: View {
-    @ObservedObject var viewModel: SubtitleViewModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Microphone")
-                    .font(.headline)
-
-                Text("Choose the input device, watch the live signal, and run a quick microphone test.")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Input device")
-                    .font(.subheadline.weight(.medium))
-
-                if viewModel.hasAvailableMicrophones {
-                    Picker(
-                        "",
-                        selection: Binding(
-                            get: { viewModel.selectedMicrophoneID },
-                            set: { viewModel.selectMicrophone($0) }
-                        )
-                    ) {
-                        ForEach(viewModel.availableMicrophones) { device in
-                            Text(device.name).tag(device.id)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    Text("No microphone devices are currently available.")
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Input level")
-                        .font(.subheadline.weight(.medium))
-
-                    Spacer()
-
-                    Text("\(Int(viewModel.microphoneLevel * 100))%")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-
-                    Text(viewModel.microphoneSignalDetected ? "Signal detected" : "No signal")
-                        .font(.caption)
-                        .foregroundStyle(viewModel.microphoneSignalDetected ? .green : .secondary)
-                }
-
-                GeometryReader { geometry in
-                    ZStack(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.secondary.opacity(0.12))
-
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(
-                                LinearGradient(
-                                    colors: [
-                                        Color(red: 0.20, green: 0.78, blue: 0.41),
-                                        Color(red: 0.93, green: 0.55, blue: 0.14),
-                                        Color(red: 0.84, green: 0.16, blue: 0.17),
-                                    ],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                )
-                            )
-                            .frame(width: max(10, geometry.size.width * max(0.03, viewModel.microphoneLevel)))
-                    }
-                }
-                .frame(height: 12)
-
-                Text(viewModel.microphoneTestDescription)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            HStack {
-                Button(viewModel.microphoneTestButtonTitle) {
-                    viewModel.toggleMicrophoneTest()
-                }
-                .disabled(viewModel.isBusy || viewModel.isMicrophoneBusy || !viewModel.hasAvailableMicrophones)
-
-                Spacer()
-
-                if viewModel.isMicrophoneListening {
-                    Label("Live", systemImage: "dot.radiowaves.left.and.right")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
-            }
-        }
-        .padding(16)
-        .frame(width: 320)
-        .onAppear {
-            viewModel.refreshAvailableMicrophones()
-        }
     }
 }
 
@@ -1833,10 +1616,10 @@ private struct ListeningSetupSheet: View {
                                         .toggleStyle(.switch)
 
                                     Picker("", selection: $viewModel.selectedTranslationLanguage) {
-                                        ForEach(TranslationLanguageOption.allCases) { language in
-                                            Text(language.displayName).tag(language)
-                                        }
+                                    ForEach(viewModel.availableTranslationLanguages) { language in
+                                        Text(language.displayName).tag(language)
                                     }
+                                }
                                     .labelsHidden()
                                     .pickerStyle(.menu)
                                     .frame(width: 140)
@@ -1971,11 +1754,11 @@ private struct ListeningSetupCard<Content: View>: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(title)
+                Text(SL(title))
                     .font(.headline)
                     .foregroundStyle(.primary)
 
-                Text(subtitle)
+                Text(SL(subtitle))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

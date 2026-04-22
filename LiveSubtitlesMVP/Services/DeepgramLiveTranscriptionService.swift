@@ -1,7 +1,7 @@
 import Foundation
 
 enum DeepgramLiveTranscriptionError: LocalizedError {
-    case missingAPIKey
+    case authenticationRequired
     case invalidRequest
     case alreadyConnected
     case sendFailed(Error)
@@ -10,8 +10,8 @@ enum DeepgramLiveTranscriptionError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .missingAPIKey:
-            return "Transcription API key is missing. Add it in Settings and try again."
+        case .authenticationRequired:
+            return "Sign in to start live transcription."
         case .invalidRequest:
             return "The app could not create the live transcription request."
         case .alreadyConnected:
@@ -38,6 +38,7 @@ struct DeepgramTranscriptResult: Sendable {
 
 actor DeepgramLiveTranscriptionService {
     private let session: URLSession
+    private let proxyService: SpeecharaBackendProxyService
 
     private var webSocketTask: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
@@ -47,12 +48,15 @@ actor DeepgramLiveTranscriptionService {
     private var errorHandler: (@Sendable (String) -> Void)?
     private var isStopping = false
 
-    init(session: URLSession = .shared) {
+    init(
+        session: URLSession = .shared,
+        proxyService: SpeecharaBackendProxyService = SpeecharaBackendProxyService()
+    ) {
         self.session = session
+        self.proxyService = proxyService
     }
 
     func connect(
-        apiKey: String,
         sourceLanguageCode: String,
         diarize: Bool = false,
         utterances: Bool = false,
@@ -63,18 +67,22 @@ actor DeepgramLiveTranscriptionService {
             throw DeepgramLiveTranscriptionError.alreadyConnected
         }
 
-        let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedAPIKey.isEmpty else {
-            throw DeepgramLiveTranscriptionError.missingAPIKey
-        }
-
-        guard let request = Self.makeRequest(
-            apiKey: trimmedAPIKey,
-            sourceLanguageCode: sourceLanguageCode,
-            diarize: diarize,
-            utterances: utterances
-        ) else {
-            throw DeepgramLiveTranscriptionError.invalidRequest
+        let request: URLRequest
+        do {
+            request = try await makeRequest(
+                sourceLanguageCode: sourceLanguageCode,
+                diarize: diarize,
+                utterances: utterances
+            )
+        } catch let error as SpeecharaBackendProxyError {
+            switch error {
+            case .authenticationRequired:
+                throw DeepgramLiveTranscriptionError.authenticationRequired
+            case .invalidRequest, .invalidBackendBaseURL:
+                throw DeepgramLiveTranscriptionError.invalidRequest
+            case .invalidResponse, .serverError:
+                throw DeepgramLiveTranscriptionError.serverError(error.localizedDescription)
+            }
         }
 
         self.eventHandler = eventHandler
@@ -248,34 +256,27 @@ actor DeepgramLiveTranscriptionService {
         isStopping = false
     }
 
-    private static func makeRequest(
-        apiKey: String,
+    private func makeRequest(
         sourceLanguageCode: String,
         diarize: Bool,
         utterances: Bool
-    ) -> URLRequest? {
-        var components = URLComponents(string: "wss://api.deepgram.com/v1/listen")
-        components?.queryItems = [
-            URLQueryItem(name: "model", value: "nova-3"),
-            URLQueryItem(name: "language", value: sourceLanguageCode),
-            URLQueryItem(name: "encoding", value: "linear16"),
-            URLQueryItem(name: "sample_rate", value: String(AudioChunkEncoder.targetSampleRate)),
-            URLQueryItem(name: "channels", value: String(AudioChunkEncoder.targetChannelCount)),
-            URLQueryItem(name: "interim_results", value: "true"),
-            URLQueryItem(name: "punctuate", value: "true"),
-            URLQueryItem(name: "diarize", value: diarize ? "true" : "false"),
-            URLQueryItem(name: "utterances", value: utterances ? "true" : "false"),
-            URLQueryItem(name: "vad_events", value: "true"),
-            URLQueryItem(name: "endpointing", value: "500"),
-        ]
-
-        guard let url = components?.url else {
-            return nil
-        }
-
-        var request = URLRequest(url: url)
-        request.setValue("Token \(apiKey)", forHTTPHeaderField: "Authorization")
-        return request
+    ) async throws -> URLRequest {
+        try await proxyService.makeWebSocketRequest(
+            path: "/api/stt/deepgram/live",
+            queryItems: [
+                URLQueryItem(name: "model", value: "nova-3"),
+                URLQueryItem(name: "language", value: sourceLanguageCode),
+                URLQueryItem(name: "encoding", value: "linear16"),
+                URLQueryItem(name: "sample_rate", value: String(AudioChunkEncoder.targetSampleRate)),
+                URLQueryItem(name: "channels", value: String(AudioChunkEncoder.targetChannelCount)),
+                URLQueryItem(name: "interim_results", value: "true"),
+                URLQueryItem(name: "punctuate", value: "true"),
+                URLQueryItem(name: "diarize", value: diarize ? "true" : "false"),
+                URLQueryItem(name: "utterances", value: utterances ? "true" : "false"),
+                URLQueryItem(name: "vad_events", value: "true"),
+                URLQueryItem(name: "endpointing", value: "500"),
+            ]
+        )
     }
 
     private static func transcript(from results: DeepgramResultsMessage) -> String {

@@ -1,24 +1,27 @@
 import Foundation
 
 enum DeepSeekTranslationError: LocalizedError {
-    case missingAPIKey
+    case authenticationRequired
     case invalidRequest
     case invalidResponse
     case requestFailed(Error)
     case serverError(String)
+    case alreadyConnected
 
     var errorDescription: String? {
         switch self {
-        case .missingAPIKey:
-            return "AI service API key is missing. Add it in Settings and try again."
+        case .authenticationRequired:
+            return "Sign in to use live translation."
         case .invalidRequest:
             return "The app could not create the translation request."
         case .invalidResponse:
-            return "The AI service returned an empty translation response."
+            return "The AI backend returned an empty translation response."
         case .requestFailed(let error):
             return "The app could not translate the final transcript: \(error.localizedDescription)"
         case .serverError(let message):
-            return "The AI service returned an error: \(message)"
+            return "The AI backend returned an error: \(message)"
+        case .alreadyConnected:
+            return "Live translation is already connected."
         }
     }
 }
@@ -35,42 +38,96 @@ struct DeepSeekTranslationHistoryTurn: Sendable {
 }
 
 actor DeepSeekTranslationService {
-    private let session: URLSession
     private let maxHistoryTurns = 4
+    private let session: URLSession
+    private let proxyService: SpeecharaBackendProxyService
 
-    private var apiKey: String?
     private var sourceLanguageName = ""
     private var targetLanguageName = ""
-    private var conversationMessages: [DeepSeekChatMessage] = []
+    private var sourceLanguageCode = ""
+    private var targetLanguageCode = ""
+    private var recentHistoryTurns: [DeepSeekTranslationHistoryTurn] = []
     private var pendingTranscriptChunks: [PendingTranslationChunk] = []
     private var isProcessingQueue = false
     private var processingTask: Task<Void, Never>?
     private var eventHandler: (@Sendable (DeepSeekTranslationEvent) -> Void)?
 
-    init(session: URLSession = .shared) {
+    private var webSocketTask: URLSessionWebSocketTask?
+    private var receiveTask: Task<Void, Never>?
+    private var keepAliveTask: Task<Void, Never>?
+    private var readyContinuation: CheckedContinuation<Void, Error>?
+    private var pendingTurnContinuations = [String: CheckedContinuation<String, Error>]()
+    private var translationSocketReady = false
+    private var isStopping = false
+    private var liveSessionID = UUID().uuidString
+
+    init(
+        session: URLSession = .shared,
+        proxyService: SpeecharaBackendProxyService = SpeecharaBackendProxyService()
+    ) {
         self.session = session
+        self.proxyService = proxyService
     }
 
     func startSession(
-        apiKey: String,
+        sourceLanguageCode: String,
         sourceLanguageName: String,
+        targetLanguageCode: String,
         targetLanguageName: String,
         eventHandler: @escaping @Sendable (DeepSeekTranslationEvent) -> Void
-    ) throws {
-        let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedAPIKey.isEmpty else {
-            throw DeepSeekTranslationError.missingAPIKey
+    ) async throws {
+        guard webSocketTask == nil else {
+            throw DeepSeekTranslationError.alreadyConnected
         }
 
-        self.apiKey = trimmedAPIKey
+        self.sourceLanguageCode = sourceLanguageCode.trimmingCharacters(in: .whitespacesAndNewlines)
         self.sourceLanguageName = sourceLanguageName
+        self.targetLanguageCode = targetLanguageCode.trimmingCharacters(in: .whitespacesAndNewlines)
         self.targetLanguageName = targetLanguageName
         self.eventHandler = eventHandler
         pendingTranscriptChunks = []
         isProcessingQueue = false
         processingTask?.cancel()
         processingTask = nil
-        conversationMessages = [makeSystemMessage()]
+        translationSocketReady = false
+        isStopping = false
+        liveSessionID = UUID().uuidString
+
+        let request: URLRequest
+        do {
+            request = try await proxyService.makeWebSocketRequest(path: "/api/ai/translation/live")
+        } catch let error as SpeecharaBackendProxyError {
+            switch error {
+            case .authenticationRequired:
+                throw DeepSeekTranslationError.authenticationRequired
+            case .invalidRequest, .invalidBackendBaseURL:
+                throw DeepSeekTranslationError.invalidRequest
+            case .invalidResponse, .serverError:
+                throw DeepSeekTranslationError.serverError(error.localizedDescription)
+            }
+        }
+
+        let webSocketTask = session.webSocketTask(with: request)
+        self.webSocketTask = webSocketTask
+        webSocketTask.resume()
+
+        startReceiveLoop(for: webSocketTask)
+        startKeepAliveLoop(for: webSocketTask)
+
+        do {
+            try await waitForReadySignal()
+            try await sendSocketMessage(
+                TranslationConfigureMessage(
+                    type: "configure",
+                    sessionId: liveSessionID,
+                    sourceLanguage: self.sourceLanguageCode,
+                    targetLanguage: self.targetLanguageCode
+                )
+            )
+        } catch {
+            await resetSession()
+            throw error
+        }
     }
 
     func enqueueFinalChunk(_ transcript: String, turnID: UUID) {
@@ -96,48 +153,49 @@ actor DeepSeekTranslationService {
         }
 
         isProcessingQueue = true
-
         processingTask = Task {
             await processPendingChunks()
         }
     }
 
-    func resetSession() {
+    func resetSession() async {
+        isStopping = true
+
         processingTask?.cancel()
         processingTask = nil
-        conversationMessages = []
-        pendingTranscriptChunks = []
+        pendingTranscriptChunks.removeAll()
         isProcessingQueue = false
-        apiKey = nil
+        recentHistoryTurns = []
+
+        failReadyIfNeeded(with: CancellationError())
+        failAllPendingTurns(with: CancellationError())
+
+        receiveTask?.cancel()
+        keepAliveTask?.cancel()
+        receiveTask = nil
+        keepAliveTask = nil
+
+        webSocketTask?.cancel(with: .normalClosure, reason: nil)
+        webSocketTask = nil
+
+        translationSocketReady = false
         sourceLanguageName = ""
         targetLanguageName = ""
+        sourceLanguageCode = ""
+        targetLanguageCode = ""
         eventHandler = nil
+        isStopping = false
+        liveSessionID = UUID().uuidString
     }
 
     func replaceHistory(with turns: [DeepSeekTranslationHistoryTurn]) {
-        conversationMessages = [makeSystemMessage()]
-
-        let recentTurns = turns.suffix(maxHistoryTurns)
-        for turn in recentTurns {
-            let source = turn.source.trimmingCharacters(in: .whitespacesAndNewlines)
-            let translation = turn.translation.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !source.isEmpty, !translation.isEmpty else {
-                continue
-            }
-
-            conversationMessages.append(DeepSeekChatMessage(role: "user", content: source))
-            conversationMessages.append(DeepSeekChatMessage(role: "assistant", content: translation))
-        }
+        recentHistoryTurns = Array(turns.suffix(maxHistoryTurns))
     }
 
     func translateStableBlock(
         _ transcript: String,
         history: [DeepSeekTranslationHistoryTurn]
     ) async throws -> String {
-        guard let apiKey else {
-            throw DeepSeekTranslationError.missingAPIKey
-        }
-
         let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTranscript.isEmpty else {
             throw DeepSeekTranslationError.invalidResponse
@@ -145,7 +203,7 @@ actor DeepSeekTranslationService {
 
         let historyMessages = history
             .suffix(maxHistoryTurns)
-            .flatMap { turn -> [DeepSeekChatMessage] in
+            .flatMap { turn -> [SpeecharaChatMessage] in
                 let source = turn.source.trimmingCharacters(in: .whitespacesAndNewlines)
                 let translation = turn.translation.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !source.isEmpty, !translation.isEmpty else {
@@ -153,8 +211,8 @@ actor DeepSeekTranslationService {
                 }
 
                 return [
-                    DeepSeekChatMessage(role: "user", content: source),
-                    DeepSeekChatMessage(role: "assistant", content: translation),
+                    SpeecharaChatMessage(role: "user", content: source),
+                    SpeecharaChatMessage(role: "assistant", content: translation),
                 ]
             }
 
@@ -166,12 +224,24 @@ actor DeepSeekTranslationService {
         \(trimmedTranscript)
         """
 
-        return try await requestCompletedTranslation(
-            apiKey: apiKey,
-            transcript: blockTranscript,
-            messages: [makeSystemMessage()] + historyMessages,
-            maxTokens: 768
+        let completion = try await proxyService.performChatCompletion(
+            SpeecharaChatCompletionRequest(
+                model: "deepseek-chat",
+                messages: [makeSystemMessage()] + historyMessages + [
+                    SpeecharaChatMessage(role: "user", content: blockTranscript),
+                ],
+                temperature: 0,
+                maxTokens: 768,
+                stream: false
+            )
         )
+
+        guard let translation = completion.choices.first?.message.content?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !translation.isEmpty else {
+            throw DeepSeekTranslationError.invalidResponse
+        }
+
+        return translation
     }
 
     private func processPendingChunks() async {
@@ -187,17 +257,17 @@ actor DeepSeekTranslationService {
             }
 
             do {
-                let translation = try await streamTranslation(
+                let translation = try await requestLiveTranslation(
                     for: nextChunk.transcript,
                     turnID: nextChunk.turnID
                 )
-                let userMessage = DeepSeekChatMessage(role: "user", content: nextChunk.transcript)
-                let assistantMessage = DeepSeekChatMessage(role: "assistant", content: translation)
-
-                conversationMessages.append(userMessage)
-                conversationMessages.append(assistantMessage)
-                trimConversationHistory()
-
+                recentHistoryTurns.append(
+                    DeepSeekTranslationHistoryTurn(
+                        source: nextChunk.transcript,
+                        translation: translation
+                    )
+                )
+                recentHistoryTurns = Array(recentHistoryTurns.suffix(maxHistoryTurns))
                 eventHandler?(.completed(nextChunk.turnID, translation))
             } catch is CancellationError {
                 pendingTranscriptChunks.removeAll()
@@ -222,56 +292,257 @@ actor DeepSeekTranslationService {
         return pendingTranscriptChunks.removeFirst()
     }
 
-    private func streamTranslation(
+    private func requestLiveTranslation(
         for transcript: String,
         turnID: UUID
     ) async throws -> String {
-        let (bytes, response) = try await streamingResponse(
-            for: transcript,
-            messages: conversationMessages,
-            maxTokens: 192
-        )
-        try await validateStreamingResponse(bytes: bytes, response: response)
-
-        var streamedTranslation = ""
-
-        for try await line in bytes.lines {
-            if Task.isCancelled {
-                throw CancellationError()
-            }
-
-            guard line.hasPrefix("data:") else {
-                continue
-            }
-
-            let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-            if payload == "[DONE]" {
-                break
-            }
-
-            guard let payloadData = payload.data(using: .utf8) else {
-                continue
-            }
-
-            let chunk = try JSONDecoder().decode(DeepSeekStreamChunk.self, from: payloadData)
-            if let delta = chunk.choices.first?.delta.content, !delta.isEmpty {
-                streamedTranslation.append(delta)
-                eventHandler?(.preview(turnID, streamedTranslation))
-            }
+        guard webSocketTask != nil, translationSocketReady else {
+            throw DeepSeekTranslationError.authenticationRequired
         }
 
-        let finalTranslation = streamedTranslation.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !finalTranslation.isEmpty else {
-            throw DeepSeekTranslationError.invalidResponse
-        }
+        let turnKey = turnID.uuidString
 
-        return finalTranslation
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pendingTurnContinuations[turnKey] = continuation
+
+                Task { [weak self] in
+                    await self?.sendTranslateTurn(
+                        transcript: transcript,
+                        turnKey: turnKey
+                    )
+                }
+            }
+        } onCancel: {
+            Task { [weak self] in
+                await self?.failPendingTurn(
+                    turnKey,
+                    with: CancellationError()
+                )
+            }
+        }
     }
 
-    private func trimConversationHistory() {
-        let systemMessage = conversationMessages.first
-        let recentTurns = conversationMessages.dropFirst().suffix(maxHistoryTurns * 2)
-        conversationMessages = [systemMessage].compactMap { $0 } + recentTurns
+    private func sendTranslateTurn(
+        transcript: String,
+        turnKey: String
+    ) async {
+        do {
+            try await sendSocketMessage(
+                TranslationTurnMessage(
+                    type: "translate_turn",
+                    turnId: turnKey,
+                    transcript: transcript,
+                    isFinal: true,
+                    sourceLanguage: sourceLanguageCode
+                )
+            )
+        } catch {
+            failPendingTurn(turnKey, with: error)
+        }
+    }
+
+    private func startReceiveLoop(for webSocketTask: URLSessionWebSocketTask) {
+        receiveTask = Task { [weak self] in
+            await self?.receiveLoop(for: webSocketTask)
+        }
+    }
+
+    private func startKeepAliveLoop(for webSocketTask: URLSessionWebSocketTask) {
+        keepAliveTask = Task { [weak self] in
+            while let self, !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                await self.sendPing(on: webSocketTask)
+            }
+        }
+    }
+
+    private func receiveLoop(for webSocketTask: URLSessionWebSocketTask) async {
+        while !Task.isCancelled {
+            do {
+                let message = try await webSocketTask.receive()
+
+                switch message {
+                case .string(let text):
+                    try await handleIncomingTextMessage(text)
+                case .data(let data):
+                    if let text = String(data: data, encoding: .utf8) {
+                        try await handleIncomingTextMessage(text)
+                    }
+                @unknown default:
+                    break
+                }
+            } catch {
+                if isStopping || Task.isCancelled {
+                    break
+                }
+
+                await handleSocketFailure(DeepSeekTranslationError.requestFailed(error))
+                break
+            }
+        }
+    }
+
+    private func sendPing(on webSocketTask: URLSessionWebSocketTask) async {
+        guard !isStopping else {
+            return
+        }
+
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                webSocketTask.sendPing { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: ())
+                    }
+                }
+            }
+        } catch {
+            await handleSocketFailure(DeepSeekTranslationError.requestFailed(error))
+        }
+    }
+
+    private func waitForReadySignal() async throws {
+        if translationSocketReady {
+            return
+        }
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await self.awaitReadySignal()
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: 10_000_000_000)
+                throw DeepSeekTranslationError.invalidResponse
+            }
+
+            _ = try await group.next()
+            group.cancelAll()
+        }
+    }
+
+    private func awaitReadySignal() async throws {
+        if translationSocketReady {
+            return
+        }
+
+        try await withCheckedThrowingContinuation { continuation in
+            readyContinuation = continuation
+        }
+    }
+
+    private func sendSocketMessage<Message: Encodable>(_ payload: Message) async throws {
+        guard let webSocketTask else {
+            throw DeepSeekTranslationError.authenticationRequired
+        }
+
+        let data = try JSONEncoder().encode(payload)
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw DeepSeekTranslationError.invalidRequest
+        }
+
+        try await webSocketTask.send(.string(text))
+    }
+
+    private func handleIncomingTextMessage(_ text: String) async throws {
+        guard let data = text.data(using: .utf8) else {
+            return
+        }
+
+        let envelope = try JSONDecoder().decode(TranslationMessageEnvelope.self, from: data)
+
+        switch envelope.type {
+        case "ready":
+            translationSocketReady = true
+            readyContinuation?.resume()
+            readyContinuation = nil
+        case "translation_revision":
+            let revision = try JSONDecoder().decode(TranslationRevisionMessage.self, from: data)
+            guard let turnID = UUID(uuidString: revision.turnId) else {
+                return
+            }
+
+            let trimmedText = revision.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedText.isEmpty else {
+                return
+            }
+
+            if revision.isFinal {
+                resumePendingTurn(revision.turnId, with: .success(trimmedText))
+            } else {
+                eventHandler?(.preview(turnID, trimmedText))
+            }
+        case "error":
+            let errorMessage = (try? JSONDecoder().decode(TranslationSocketErrorMessage.self, from: data))?.message
+                ?? "Unknown translation service error."
+            throw DeepSeekTranslationError.serverError(errorMessage)
+        default:
+            return
+        }
+    }
+
+    private func handleSocketFailure(_ error: Error) async {
+        if isStopping {
+            return
+        }
+
+        let shouldEmitFailure = pendingTurnContinuations.isEmpty && pendingTranscriptChunks.isEmpty
+        failReadyIfNeeded(with: error)
+        failAllPendingTurns(with: error)
+
+        receiveTask?.cancel()
+        keepAliveTask?.cancel()
+        receiveTask = nil
+        keepAliveTask = nil
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
+        webSocketTask = nil
+        translationSocketReady = false
+
+        if shouldEmitFailure {
+            eventHandler?(.failed(error.localizedDescription))
+        }
+    }
+
+    private func failReadyIfNeeded(with error: Error) {
+        readyContinuation?.resume(throwing: error)
+        readyContinuation = nil
+    }
+
+    private func failAllPendingTurns(with error: Error) {
+        let continuations = pendingTurnContinuations.values
+        pendingTurnContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume(throwing: error)
+        }
+    }
+
+    private func failPendingTurn(_ turnKey: String, with error: Error) {
+        guard let continuation = pendingTurnContinuations.removeValue(forKey: turnKey) else {
+            return
+        }
+
+        continuation.resume(throwing: error)
+    }
+
+    private func resumePendingTurn(_ turnKey: String, with result: Result<String, Error>) {
+        guard let continuation = pendingTurnContinuations.removeValue(forKey: turnKey) else {
+            return
+        }
+
+        continuation.resume(with: result)
+    }
+
+    private func makeSystemMessage() -> SpeecharaChatMessage {
+        SpeecharaChatMessage(
+            role: "system",
+            content: """
+            Translate new live meeting fragments from \(sourceLanguageName) to \(targetLanguageName).
+            Use prior translated turns only as short context. Preserve line breaks and any leading timestamps like [12:34].
+            If a line starts with a speaker label before a colon, preserve the label and translate only the spoken content.
+            Return only the translated fragment in \(targetLanguageName), with no commentary.
+            """
+        )
     }
 
     private func mergedTranscriptChunk(existing: String, addition: String) -> String {
@@ -296,125 +567,6 @@ actor DeepSeekTranslationService {
 
         return "\(trimmedExisting) \(trimmedAddition)"
     }
-
-    private func makeSystemMessage() -> DeepSeekChatMessage {
-        DeepSeekChatMessage(
-            role: "system",
-            content: """
-            Translate new live meeting fragments from \(sourceLanguageName) to \(targetLanguageName).
-            Use prior translated turns only as short context. Preserve line breaks and any leading timestamps like [12:34].
-            If a line starts with a speaker label before a colon, preserve the label and translate only the spoken content.
-            Return only the translated fragment in \(targetLanguageName), with no commentary.
-            """
-        )
-    }
-
-    private func streamingResponse(
-        for transcript: String,
-        messages: [DeepSeekChatMessage],
-        maxTokens: Int
-    ) async throws -> (URLSession.AsyncBytes, URLResponse) {
-        guard let apiKey else {
-            throw DeepSeekTranslationError.missingAPIKey
-        }
-
-        let userMessage = DeepSeekChatMessage(role: "user", content: transcript)
-        let requestBody = DeepSeekChatCompletionRequest(
-            model: "deepseek-chat",
-            messages: messages + [userMessage],
-            temperature: 0,
-            maxTokens: maxTokens,
-            stream: true
-        )
-
-        guard let request = try makeRequest(apiKey: apiKey, requestBody: requestBody) else {
-            throw DeepSeekTranslationError.invalidRequest
-        }
-
-        return try await session.bytes(for: request)
-    }
-
-    private func requestCompletedTranslation(
-        apiKey: String,
-        transcript: String,
-        messages: [DeepSeekChatMessage],
-        maxTokens: Int
-    ) async throws -> String {
-        let userMessage = DeepSeekChatMessage(role: "user", content: transcript)
-        let requestBody = DeepSeekChatCompletionRequest(
-            model: "deepseek-chat",
-            messages: messages + [userMessage],
-            temperature: 0,
-            maxTokens: maxTokens,
-            stream: false
-        )
-
-        guard let request = try makeRequest(apiKey: apiKey, requestBody: requestBody) else {
-            throw DeepSeekTranslationError.invalidRequest
-        }
-
-        let (data, response) = try await session.data(for: request)
-        try validateResponse(data: data, response: response)
-
-        let completion = try JSONDecoder().decode(DeepSeekChatCompletionResponse.self, from: data)
-        guard let translation = completion.choices.first?.message.content?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !translation.isEmpty else {
-            throw DeepSeekTranslationError.invalidResponse
-        }
-
-        return translation
-    }
-
-    private func makeRequest(
-        apiKey: String,
-        requestBody: DeepSeekChatCompletionRequest
-    ) throws -> URLRequest? {
-        guard let url = URL(string: "https://api.deepseek.com/chat/completions") else {
-            return nil
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONEncoder().encode(requestBody)
-        return request
-    }
-
-    private func validateStreamingResponse(
-        bytes: URLSession.AsyncBytes,
-        response: URLResponse
-    ) async throws {
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw DeepSeekTranslationError.invalidResponse
-        }
-
-        guard (200 ... 299).contains(httpResponse.statusCode) else {
-            var data = Data()
-            for try await byte in bytes {
-                data.append(byte)
-            }
-
-            let errorMessage = (try? JSONDecoder().decode(DeepSeekErrorResponse.self, from: data))?.error.message
-                ?? String(data: data, encoding: .utf8)
-                ?? "HTTP \(httpResponse.statusCode)"
-            throw DeepSeekTranslationError.serverError(errorMessage)
-        }
-    }
-
-    private func validateResponse(data: Data, response: URLResponse) throws {
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw DeepSeekTranslationError.invalidResponse
-        }
-
-        guard (200 ... 299).contains(httpResponse.statusCode) else {
-            let errorMessage = (try? JSONDecoder().decode(DeepSeekErrorResponse.self, from: data))?.error.message
-                ?? String(data: data, encoding: .utf8)
-                ?? "HTTP \(httpResponse.statusCode)"
-            throw DeepSeekTranslationError.serverError(errorMessage)
-        }
-    }
 }
 
 private struct PendingTranslationChunk {
@@ -422,55 +574,35 @@ private struct PendingTranslationChunk {
     var transcript: String
 }
 
-private struct DeepSeekChatCompletionRequest: Encodable {
-    let model: String
-    let messages: [DeepSeekChatMessage]
-    let temperature: Double
-    let maxTokens: Int
-    let stream: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case model
-        case messages
-        case temperature
-        case maxTokens = "max_tokens"
-        case stream
-    }
+private struct TranslationMessageEnvelope: Decodable {
+    let type: String
 }
 
-private struct DeepSeekChatMessage: Codable {
-    let role: String
-    let content: String
+private struct TranslationConfigureMessage: Encodable {
+    let type: String
+    let sessionId: String
+    let sourceLanguage: String
+    let targetLanguage: String
 }
 
-private struct DeepSeekStreamChunk: Decodable {
-    let choices: [DeepSeekStreamChoice]
+private struct TranslationTurnMessage: Encodable {
+    let type: String
+    let turnId: String
+    let transcript: String
+    let isFinal: Bool
+    let sourceLanguage: String
 }
 
-private struct DeepSeekStreamChoice: Decodable {
-    let delta: DeepSeekStreamDelta
+private struct TranslationRevisionMessage: Decodable {
+    let type: String
+    let turnId: String
+    let revision: Int
+    let text: String
+    let isFinal: Bool
+    let targetLanguage: String?
 }
 
-private struct DeepSeekStreamDelta: Decodable {
-    let content: String?
-}
-
-private struct DeepSeekErrorResponse: Decodable {
-    let error: DeepSeekErrorBody
-}
-
-private struct DeepSeekErrorBody: Decodable {
-    let message: String
-}
-
-private struct DeepSeekChatCompletionResponse: Decodable {
-    let choices: [DeepSeekChatCompletionChoice]
-}
-
-private struct DeepSeekChatCompletionChoice: Decodable {
-    let message: DeepSeekChatCompletionChoiceMessage
-}
-
-private struct DeepSeekChatCompletionChoiceMessage: Decodable {
-    let content: String?
+private struct TranslationSocketErrorMessage: Decodable {
+    let type: String
+    let message: String?
 }

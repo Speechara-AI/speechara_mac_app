@@ -81,6 +81,34 @@ open ~/Applications/Speechara.app
 The stable installed copy is useful for macOS permissions, but it will not inherit Xcode scheme environment variables. For Deepgram testing, launch from the Xcode scheme that contains `DEEPGRAM_API_KEY`.
 The DeepSeek translation feature also requires launching from the Xcode scheme that contains `DEEPSEEK_API_KEY`.
 
+## How to build a standard DMG installer
+
+To produce a drag-to-install `.dmg` that includes the app on the left and an `Applications` shortcut on the right, run:
+
+```bash
+./Scripts/create_dmg.sh
+```
+
+The script builds the `Release` app, generates a simple installer background, configures the Finder window layout, and writes the final artifact to:
+
+```bash
+build/dmg/Speechara.dmg
+```
+
+Useful options:
+
+```bash
+./Scripts/create_dmg.sh --unsigned
+./Scripts/create_dmg.sh --app /absolute/path/to/Speechara.app --skip-build
+./Scripts/create_dmg.sh --no-layout
+```
+
+Notes:
+
+- `--no-layout` is useful in headless CI because the standard Finder layout step uses `osascript`.
+- Even without the custom layout step, the generated image still contains the `Applications` shortcut for manual drag-and-drop install.
+- For external distribution, sign and notarize the `.app` before shipping the DMG so Gatekeeper warnings stay minimal.
+
 ## Next development steps
 
 1. Separate system and microphone speakers in the transcript so overlapping dialogue is easier to read.

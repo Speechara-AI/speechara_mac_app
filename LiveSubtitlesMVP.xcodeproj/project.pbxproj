@@ -30,6 +30,10 @@
 				B10000000000000000000021 /* AuthenticationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000019 /* AuthenticationView.swift */; };
 				B10000000000000000000022 /* AuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001A /* AuthService.swift */; };
 				B10000000000000000000023 /* MeetingSessionHistoryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001B /* MeetingSessionHistoryService.swift */; };
+				B10000000000000000000024 /* SpeecharaWorkspaceShellView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001C /* SpeecharaWorkspaceShellView.swift */; };
+				B10000000000000000000025 /* SpeecharaProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001D /* SpeecharaProfileView.swift */; };
+				B10000000000000000000026 /* SpeecharaHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001E /* SpeecharaHistoryView.swift */; };
+				B10000000000000000000027 /* SpeecharaLocalization.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001F /* SpeecharaLocalization.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -60,6 +64,10 @@
 				F10000000000000000000019 /* AuthenticationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationView.swift; sourceTree = "<group>"; };
 				F1000000000000000000001A /* AuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthService.swift; sourceTree = "<group>"; };
 				F1000000000000000000001B /* MeetingSessionHistoryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingSessionHistoryService.swift; sourceTree = "<group>"; };
+				F1000000000000000000001C /* SpeecharaWorkspaceShellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeecharaWorkspaceShellView.swift; sourceTree = "<group>"; };
+				F1000000000000000000001D /* SpeecharaProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeecharaProfileView.swift; sourceTree = "<group>"; };
+				F1000000000000000000001E /* SpeecharaHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeecharaHistoryView.swift; sourceTree = "<group>"; };
+				F1000000000000000000001F /* SpeecharaLocalization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeecharaLocalization.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -103,6 +111,9 @@
 						F10000000000000000000019 /* AuthenticationView.swift */,
 						F10000000000000000000014 /* SpeecharaSettingsView.swift */,
 						F10000000000000000000016 /* PermissionsOnboardingView.swift */,
+						F1000000000000000000001C /* SpeecharaWorkspaceShellView.swift */,
+						F1000000000000000000001D /* SpeecharaProfileView.swift */,
+						F1000000000000000000001E /* SpeecharaHistoryView.swift */,
 					);
 				path = Views;
 				sourceTree = "<group>";
@@ -139,6 +150,7 @@
 						F10000000000000000000006 /* SystemAudioCaptureService.swift */,
 						F10000000000000000000007 /* M4AAudioFileWriter.swift */,
 						F10000000000000000000015 /* AppSecretsStore.swift */,
+						F1000000000000000000001F /* SpeecharaLocalization.swift */,
 						F1000000000000000000001A /* AuthService.swift */,
 						F1000000000000000000001B /* MeetingSessionHistoryService.swift */,
 						F10000000000000000000017 /* AppPermissionsController.swift */,
@@ -261,7 +273,11 @@
 						B10000000000000000000021 /* AuthenticationView.swift in Sources */,
 						B10000000000000000000022 /* AuthService.swift in Sources */,
 						B10000000000000000000023 /* MeetingSessionHistoryService.swift in Sources */,
-					);
+				B10000000000000000000024 /* SpeecharaWorkspaceShellView.swift in Sources */,
+				B10000000000000000000025 /* SpeecharaProfileView.swift in Sources */,
+				B10000000000000000000026 /* SpeecharaHistoryView.swift in Sources */,
+				B10000000000000000000027 /* SpeecharaLocalization.swift in Sources */,
+			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */

@@ -33,7 +33,7 @@ struct AuthenticationView: View {
                             HStack(spacing: 14) {
                                 GoogleMark()
 
-                                Text(authStore.isAuthenticating ? "Waiting for Google…" : "Continue with Google")
+                                Text(authStore.isAuthenticating ? SL("Waiting for Google…") : SL("Continue with Google"))
                                     .font(.system(size: 16, weight: .semibold))
                             }
                             .foregroundStyle(.primary)
@@ -220,7 +220,7 @@ private struct AuthMessageStrip: View {
                         .foregroundStyle(tint)
                 )
 
-            Text(text)
+            Text(SL(text))
                 .font(.system(size: 13, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

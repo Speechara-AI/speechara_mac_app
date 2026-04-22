@@ -17,6 +17,7 @@ struct AuthenticatedUser: Codable, Equatable {
     let workspaceID: String?
     let defaultWorkspaceID: String?
     let currentWorkspaceID: String?
+    let newbie: Bool?
     let workspace: WorkspaceReference?
     let defaultWorkspace: WorkspaceReference?
     let currentWorkspace: WorkspaceReference?
@@ -30,6 +31,7 @@ struct AuthenticatedUser: Codable, Equatable {
         case workspaceID = "workspaceId"
         case defaultWorkspaceID = "defaultWorkspaceId"
         case currentWorkspaceID = "currentWorkspaceId"
+        case newbie
         case workspace
         case defaultWorkspace
         case currentWorkspace
@@ -49,6 +51,27 @@ struct AuthenticatedUser: Codable, Equatable {
 
         return String(email.prefix(1)).uppercased()
     }
+
+    var isNewbie: Bool {
+        newbie ?? false
+    }
+
+    fileprivate func updating(with profile: CurrentUserProfileResponse) -> AuthenticatedUser {
+        AuthenticatedUser(
+            id: profile.id.nonEmptyTrimmed ?? id,
+            email: profile.email.nonEmptyTrimmed ?? email,
+            displayName: profile.displayName.nonEmptyTrimmed ?? displayName,
+            avatarURL: profile.avatarURL.nonEmptyTrimmed ?? avatarURL,
+            workspaceID: workspaceID,
+            defaultWorkspaceID: defaultWorkspaceID,
+            currentWorkspaceID: currentWorkspaceID,
+            newbie: profile.newbie ?? newbie,
+            workspace: workspace,
+            defaultWorkspace: defaultWorkspace,
+            currentWorkspace: currentWorkspace,
+            workspaces: workspaces
+        )
+    }
 }
 
 struct AuthSession: Codable, Equatable {
@@ -60,6 +83,43 @@ struct AuthSession: Codable, Equatable {
 
     var needsRefresh: Bool {
         expiresAt.timeIntervalSinceNow <= 60
+    }
+
+    func updating(user: AuthenticatedUser) -> AuthSession {
+        AuthSession(
+            accessToken: accessToken,
+            refreshToken: refreshToken,
+            tokenType: tokenType,
+            expiresAt: expiresAt,
+            user: user
+        )
+    }
+}
+
+private struct CurrentUserProfileResponse: Decodable, Equatable {
+    let id: String?
+    let email: String?
+    let displayName: String?
+    let avatarURL: String?
+    let newbie: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case email
+        case displayName = "display_name"
+        case avatarURL = "avatar_url"
+        case newbie
+    }
+}
+
+private extension Optional where Wrapped == String {
+    var nonEmptyTrimmed: String? {
+        guard let value = self?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+
+        return value
     }
 }
 
@@ -172,6 +232,10 @@ final class AuthService {
         enum CodingKeys: String, CodingKey {
             case refreshToken = "refresh_token"
         }
+    }
+
+    private struct UpdateCurrentUserRequest: Encodable {
+        let newbie: Bool
     }
 
     private struct SessionResponse: Decodable {
@@ -414,6 +478,37 @@ final class AuthService {
         }
     }
 
+    func refreshCurrentUserProfile() async throws -> AuthSession {
+        let currentSession = try await activeSession()
+        let response: CurrentUserProfileResponse = try await performJSONRequest(
+            url: makeCurrentUserURL(),
+            method: "GET",
+            bearerToken: currentSession.accessToken
+        )
+
+        let updatedSession = currentSession.updating(
+            user: currentSession.user.updating(with: response)
+        )
+        try persistSession(updatedSession)
+        return updatedSession
+    }
+
+    func updateCurrentUser(newbie: Bool) async throws -> AuthSession {
+        let currentSession = try await activeSession()
+        let response: CurrentUserProfileResponse = try await performJSONRequest(
+            url: makeCurrentUserURL(),
+            method: "PATCH",
+            body: UpdateCurrentUserRequest(newbie: newbie),
+            bearerToken: currentSession.accessToken
+        )
+
+        let updatedSession = currentSession.updating(
+            user: currentSession.user.updating(with: response)
+        )
+        try persistSession(updatedSession)
+        return updatedSession
+    }
+
     private func requestAuthorizationURL(
         configuration: Configuration,
         transaction: GoogleAuthTransaction,
@@ -478,6 +573,12 @@ final class AuthService {
         return Configuration(baseURL: url)
     }
 
+    private func makeCurrentUserURL() throws -> URL {
+        try makeConfiguration()
+            .baseURL
+            .appendingPathComponent("v1/auth/me")
+    }
+
     private func persistSession(_ session: AuthSession) throws {
         let data = try encoder.encode(session)
         try keychainStore.save(data, account: sessionAccount)
@@ -501,6 +602,34 @@ final class AuthService {
         body: Body?,
         bearerToken: String?
     ) async throws -> Response {
+        let bodyData = try body.map { try encoder.encode($0) }
+        return try await performJSONRequest(
+            url: url,
+            method: method,
+            bodyData: bodyData,
+            bearerToken: bearerToken
+        )
+    }
+
+    private func performJSONRequest<Response: Decodable>(
+        url: URL,
+        method: String,
+        bearerToken: String?
+    ) async throws -> Response {
+        try await performJSONRequest(
+            url: url,
+            method: method,
+            bodyData: nil,
+            bearerToken: bearerToken
+        )
+    }
+
+    private func performJSONRequest<Response: Decodable>(
+        url: URL,
+        method: String,
+        bodyData: Data?,
+        bearerToken: String?
+    ) async throws -> Response {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -510,8 +639,8 @@ final class AuthService {
             request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
         }
 
-        if let body {
-            request.httpBody = try encoder.encode(body)
+        if let bodyData {
+            request.httpBody = bodyData
         }
 
         let (data, response) = try await session.data(for: request)
@@ -616,6 +745,14 @@ final class AuthSessionStore: ObservableObject {
 
     var signedInDisplayName: String? {
         session?.user.displayName
+    }
+
+    func refreshCurrentUserProfile() async throws {
+        session = try await authService.refreshCurrentUserProfile()
+    }
+
+    func updateCurrentUser(newbie: Bool) async throws {
+        session = try await authService.updateCurrentUser(newbie: newbie)
     }
 
     func signInWithGoogle() {

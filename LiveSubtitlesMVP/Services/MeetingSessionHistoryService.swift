@@ -5,14 +5,14 @@ enum MeetingSessionHistoryStatus: String {
     case completed
 }
 
-struct MeetingSessionHistorySessionParams: Encodable, Equatable {
+struct MeetingSessionHistorySessionParams: Codable, Equatable {
     let client: String
     let source: String
-    let appVersion: String
+    let appVersion: String?
     let focusMode: Bool?
 }
 
-struct MeetingSessionTranscriptBlock: Encodable, Equatable {
+struct MeetingSessionTranscriptBlock: Codable, Equatable {
     let id: String
     let seq: Int
     let timestamp: String
@@ -20,11 +20,101 @@ struct MeetingSessionTranscriptBlock: Encodable, Equatable {
     let text: String
 }
 
-struct MeetingSessionTranslationBlock: Encodable, Equatable {
+struct MeetingSessionTranslationBlock: Codable, Equatable {
     let transcriptBlockId: String
     let seq: Int
     let language: String
     let text: String
+}
+
+struct MeetingSessionHistoryListQuery: Equatable {
+    let limit: Int
+    let cursor: String?
+    let searchQuery: String?
+    let dateFrom: Date?
+    let dateTo: Date?
+
+    init(
+        limit: Int = 20,
+        cursor: String? = nil,
+        searchQuery: String? = nil,
+        dateFrom: Date? = nil,
+        dateTo: Date? = nil
+    ) {
+        self.limit = min(max(limit, 1), 100)
+        self.cursor = cursor
+        self.searchQuery = searchQuery
+        self.dateFrom = dateFrom
+        self.dateTo = dateTo
+    }
+}
+
+struct MeetingSessionHistoryListPage: Equatable {
+    let items: [MeetingSessionHistoryListItem]
+    let nextCursor: String?
+}
+
+struct MeetingSessionHistoryListItem: Decodable, Equatable, Identifiable {
+    let id: String
+    let title: String?
+    let status: String
+    let startedAt: Date
+    let updatedAt: Date
+    let durationSeconds: Int?
+    let processedByApp: String?
+    let previewText: String?
+    let inputLanguage: String?
+    let translationLanguage: String?
+    let translationEnabled: Bool
+    let recordingEnabled: Bool
+    let wordCount: Int?
+    let lineCount: Int?
+    let hasSummary: Bool
+    let hasProtocol: Bool
+    let hasSuggestedAnswer: Bool
+}
+
+struct MeetingSessionHistoryStats: Decodable, Equatable {
+    let wordCount: Int?
+    let lineCount: Int?
+    let hasSummary: Bool?
+    let hasProtocol: Bool?
+    let hasSuggestedAnswer: Bool?
+}
+
+struct MeetingSessionHistoryDetail: Decodable, Equatable, Identifiable {
+    let id: String
+    let workspaceId: String?
+    let title: String?
+    let status: String
+    let startedAt: Date
+    let endedAt: Date?
+    let durationSeconds: Int?
+    let processedByApp: String?
+    let inputLanguage: String?
+    let translationLanguage: String?
+    let translationEnabled: Bool
+    let recordingEnabled: Bool
+    let microphoneLabel: String?
+    let previewText: String?
+    let transcriptText: String?
+    let transcriptJson: [MeetingSessionTranscriptBlock]?
+    let translationText: String?
+    let translationJson: [MeetingSessionTranslationBlock]?
+    let summaryText: String?
+    let protocolText: String?
+    let suggestedAnswerText: String?
+    let sessionParams: MeetingSessionHistorySessionParams?
+    let statsJson: MeetingSessionHistoryStats?
+    let wordCount: Int?
+    let lineCount: Int?
+    let revision: Int
+    let createdAt: Date?
+    let updatedAt: Date
+    let deletedAt: Date?
+    let hasSummary: Bool
+    let hasProtocol: Bool
+    let hasSuggestedAnswer: Bool
 }
 
 struct MeetingSessionHistorySnapshot: Equatable {
@@ -62,7 +152,7 @@ struct MeetingSessionHistorySnapshot: Equatable {
             suggestedAnswerText ?? "",
             sessionParams.client,
             sessionParams.source,
-            sessionParams.appVersion,
+            sessionParams.appVersion ?? "",
             sessionParams.focusMode.map(String.init) ?? "",
             transcriptBlocks
                 .map { "\($0.id)|\($0.seq)|\($0.timestamp)|\($0.speakerLabel ?? "")|\($0.text)" }
@@ -154,8 +244,8 @@ final class MeetingSessionHistoryService {
 
     private let session: URLSession
     private let authService: AuthService
-    private let decoder = JSONDecoder()
-    private let encoder = JSONEncoder()
+    private let decoder: JSONDecoder
+    private let encoder: JSONEncoder
 
     init(
         session: URLSession = .shared,
@@ -163,6 +253,118 @@ final class MeetingSessionHistoryService {
     ) {
         self.session = session
         self.authService = authService
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            try MeetingSessionHistoryService.decodeBackendDate(from: decoder)
+        }
+        self.decoder = decoder
+
+        self.encoder = JSONEncoder()
+    }
+
+    func fetchSessions(
+        query listQuery: MeetingSessionHistoryListQuery = MeetingSessionHistoryListQuery()
+    ) async throws -> MeetingSessionHistoryListPage {
+        let activeSession = try await resolvedAuthSession()
+        let configuration = try makeConfiguration(for: activeSession)
+
+        let data = try await performGraphQLRequest(
+            endpoint: configuration.graphQLEndpoint,
+            accessToken: activeSession.accessToken,
+            query: """
+            query MeetingSessions($workspaceId: ID!, $limit: Int, $cursor: String, $q: String, $dateFrom: String, $dateTo: String) {
+              meetingSessions(workspaceId: $workspaceId, limit: $limit, cursor: $cursor, q: $q, dateFrom: $dateFrom, dateTo: $dateTo) {
+                items {
+                  id
+                  title
+                  status
+                  startedAt
+                  updatedAt
+                  durationSeconds
+                  processedByApp
+                  previewText
+                  inputLanguage
+                  translationLanguage
+                  translationEnabled
+                  recordingEnabled
+                  wordCount
+                  lineCount
+                  hasSummary
+                  hasProtocol
+                  hasSuggestedAnswer
+                }
+                nextCursor
+              }
+            }
+            """,
+            variables: MeetingSessionsVariables(
+                workspaceId: configuration.workspaceID,
+                limit: listQuery.limit,
+                cursor: listQuery.cursor?.trimmedOrNil,
+                q: listQuery.searchQuery?.trimmedOrNil,
+                dateFrom: listQuery.dateFrom?.iso8601String,
+                dateTo: listQuery.dateTo?.iso8601String
+            ),
+            responseType: MeetingSessionsResponse.self
+        )
+
+        return MeetingSessionHistoryListPage(
+            items: data.meetingSessions.items,
+            nextCursor: data.meetingSessions.nextCursor
+        )
+    }
+
+    func fetchSessionDetail(id: String) async throws -> MeetingSessionHistoryDetail {
+        let activeSession = try await resolvedAuthSession()
+        let configuration = try makeConfiguration(for: activeSession)
+
+        let data = try await performGraphQLRequest(
+            endpoint: configuration.graphQLEndpoint,
+            accessToken: activeSession.accessToken,
+            query: """
+            query MeetingSession($id: ID!) {
+              meetingSession(id: $id) {
+                id
+                workspaceId
+                title
+                status
+                startedAt
+                endedAt
+                durationSeconds
+                processedByApp
+                inputLanguage
+                translationLanguage
+                translationEnabled
+                recordingEnabled
+                microphoneLabel
+                previewText
+                transcriptText
+                transcriptJson
+                translationText
+                translationJson
+                summaryText
+                protocolText
+                suggestedAnswerText
+                sessionParams
+                statsJson
+                wordCount
+                lineCount
+                revision
+                createdAt
+                updatedAt
+                deletedAt
+                hasSummary
+                hasProtocol
+                hasSuggestedAnswer
+              }
+            }
+            """,
+            variables: MeetingSessionVariables(id: id),
+            responseType: MeetingSessionDetailResponse.self
+        )
+
+        return data.meetingSession
     }
 
     func startSession(snapshot: MeetingSessionHistorySnapshot) async throws -> MeetingSessionHistoryRemoteState {
@@ -309,7 +511,7 @@ final class MeetingSessionHistoryService {
             }
             """,
             variables: MeetingSessionVariables(id: id),
-            responseType: MeetingSessionResponse.self
+            responseType: MeetingSessionStateResponse.self
         )
 
         return MeetingSessionHistoryRemoteState(
@@ -382,7 +584,11 @@ final class MeetingSessionHistoryService {
         request.httpBody = try encoder.encode(GraphQLRequest(query: query, variables: variables))
 
         let (data, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse, (200 ... 299).contains(httpResponse.statusCode) else {
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw MeetingSessionHistoryServiceError.invalidResponse
+        }
+
+        guard (200 ... 299).contains(httpResponse.statusCode) else {
             if let message = graphqlErrorMessage(from: data) {
                 throw MeetingSessionHistoryServiceError.graphqlRequestFailed(message)
             }
@@ -411,6 +617,27 @@ final class MeetingSessionHistoryService {
 
         return payload.errors?.compactMap(\.message).first
     }
+
+    private static func decodeBackendDate(from decoder: Decoder) throws -> Date {
+        let container = try decoder.singleValueContainer()
+        let rawValue = try container.decode(String.self)
+
+        let standardFormatter = ISO8601DateFormatter()
+        if let date = standardFormatter.date(from: rawValue) {
+            return date
+        }
+
+        let fractionalFormatter = ISO8601DateFormatter()
+        fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractionalFormatter.date(from: rawValue) {
+            return date
+        }
+
+        throw DecodingError.dataCorruptedError(
+            in: container,
+            debugDescription: "Expected ISO 8601 date string, got \(rawValue)."
+        )
+    }
 }
 
 private struct GraphQLRequest<Variables: Encodable>: Encodable {
@@ -420,6 +647,19 @@ private struct GraphQLRequest<Variables: Encodable>: Encodable {
 
 private struct EmptyGraphQLData: Decodable {}
 
+private struct MeetingSessionsConnection: Decodable {
+    let items: [MeetingSessionHistoryListItem]
+    let nextCursor: String?
+}
+
+private struct MeetingSessionsResponse: Decodable {
+    let meetingSessions: MeetingSessionsConnection
+}
+
+private struct MeetingSessionDetailResponse: Decodable {
+    let meetingSession: MeetingSessionHistoryDetail
+}
+
 private struct StartMeetingSessionResponse: Decodable {
     let startMeetingSession: MeetingSessionHistoryService.RemoteSessionResponse
 }
@@ -428,8 +668,17 @@ private struct UpdateMeetingSessionResponse: Decodable {
     let updateMeetingSession: MeetingSessionHistoryService.RemoteSessionResponse
 }
 
-private struct MeetingSessionResponse: Decodable {
+private struct MeetingSessionStateResponse: Decodable {
     let meetingSession: MeetingSessionHistoryService.RemoteSessionResponse
+}
+
+private struct MeetingSessionsVariables: Encodable {
+    let workspaceId: String
+    let limit: Int
+    let cursor: String?
+    let q: String?
+    let dateFrom: String?
+    let dateTo: String?
 }
 
 private struct StartMeetingSessionVariables: Encodable {
@@ -443,6 +692,13 @@ private struct UpdateMeetingSessionVariables: Encodable {
 
 private struct MeetingSessionVariables: Encodable {
     let id: String
+}
+
+private extension String {
+    var trimmedOrNil: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 }
 
 private extension Date {

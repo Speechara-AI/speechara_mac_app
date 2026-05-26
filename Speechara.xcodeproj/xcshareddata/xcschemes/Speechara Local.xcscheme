@@ -17,8 +17,8 @@
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "A10000000000000000000001"
                BuildableName = "Speechara.app"
-               BlueprintName = "LiveSubtitlesMVP"
-               ReferencedContainer = "container:LiveSubtitlesMVP.xcodeproj">
+               BlueprintName = "Speechara"
+               ReferencedContainer = "container:Speechara.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -47,19 +47,19 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A10000000000000000000001"
             BuildableName = "Speechara.app"
-            BlueprintName = "LiveSubtitlesMVP"
-            ReferencedContainer = "container:LiveSubtitlesMVP.xcodeproj">
+            BlueprintName = "Speechara"
+            ReferencedContainer = "container:Speechara.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
       <EnvironmentVariables>
          <EnvironmentVariable
             key = "DEEPGRAM_API_KEY"
-            value = "a2d91b8b66f91fe8c7a944802e3fa68bac5ba5a0"
+            value = "your_deepgram_key_here"
             isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable
             key = "DEEPSEEK_API_KEY"
-            value = "sk-c05e71c266eb4a0a9af64c3b40ada261"
+            value = "your_deepseek_key_here"
             isEnabled = "YES">
          </EnvironmentVariable>
       </EnvironmentVariables>
@@ -76,8 +76,8 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A10000000000000000000001"
             BuildableName = "Speechara.app"
-            BlueprintName = "LiveSubtitlesMVP"
-            ReferencedContainer = "container:LiveSubtitlesMVP.xcodeproj">
+            BlueprintName = "Speechara"
+            ReferencedContainer = "container:Speechara.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

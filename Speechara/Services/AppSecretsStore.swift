@@ -487,6 +487,7 @@ final class SpeecharaBillingService {
 
 enum AppConfigurationKind: CaseIterable, Identifiable {
     case authBackendBaseURL
+    case microsoftClientID
     case defaultWorkspaceID
 
     var id: Self { self }
@@ -495,6 +496,8 @@ enum AppConfigurationKind: CaseIterable, Identifiable {
         switch self {
         case .authBackendBaseURL:
             return "SPEECHARA_AUTH_BASE_URL"
+        case .microsoftClientID:
+            return "SPEECHARA_MICROSOFT_CLIENT_ID"
         case .defaultWorkspaceID:
             return "SPEECHARA_DEFAULT_WORKSPACE_ID"
         }
@@ -504,6 +507,8 @@ enum AppConfigurationKind: CaseIterable, Identifiable {
         switch self {
         case .authBackendBaseURL:
             return "speechara.savedAuthBackendBaseURL"
+        case .microsoftClientID:
+            return "speechara.savedMicrosoftClientID"
         case .defaultWorkspaceID:
             return "speechara.savedDefaultWorkspaceID"
         }
@@ -513,6 +518,8 @@ enum AppConfigurationKind: CaseIterable, Identifiable {
         switch self {
         case .authBackendBaseURL:
             return "Auth backend URL"
+        case .microsoftClientID:
+            return "Microsoft client ID"
         case .defaultWorkspaceID:
             return "Default workspace ID"
         }
@@ -522,6 +529,8 @@ enum AppConfigurationKind: CaseIterable, Identifiable {
         switch self {
         case .authBackendBaseURL:
             return "https://api.speechara.ai"
+        case .microsoftClientID:
+            return nil
         case .defaultWorkspaceID:
             return "2b7f6b0d-5a5e-4f35-9f5d-8e7b4a0c6f21"
         }

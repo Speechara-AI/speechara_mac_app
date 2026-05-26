@@ -1,4 +1,4 @@
-# LiveSubtitlesMVP
+# Speechara
 
 Minimal native macOS SwiftUI MVP for a future live subtitles and translation tool.
 
@@ -11,16 +11,16 @@ Minimal native macOS SwiftUI MVP for a future live subtitles and translation too
 - Streams captured audio to Deepgram over WebSocket for live transcription using the selected source language.
 - Can mix optional live microphone audio into the same transcription stream while the session is already running.
 - Sends only final transcript chunks to DeepSeek for contextual translation when translation is enabled.
-- Optionally saves a compressed `.m4a` file into `~/Downloads/LiveSubtitlesMVP/` when local audio saving is enabled for the session.
+- Optionally saves a compressed `.m4a` file into `~/Downloads/Speechara/` when local audio saving is enabled for the session.
 - Shows a live subtitle preview plus committed transcript lines and translated text in the UI.
 - Displays the latest saved M4A path in the UI.
 
 ## Project structure
 
 ```text
-LiveSubtitlesMVP.xcodeproj/        Xcode project
-LiveSubtitlesMVP/
-  LiveSubtitlesMVPApp.swift        App entry point
+Speechara.xcodeproj/        Xcode project
+Speechara/
+  SpeecharaApp.swift        App entry point
   Views/
     ContentView.swift              Main window UI
   ViewModels/
@@ -41,8 +41,8 @@ README.md
 ## How to open and run in Xcode
 
 1. Install the full Xcode app on macOS if it is not installed yet.
-2. Open `LiveSubtitlesMVP.xcodeproj` in Xcode.
-3. Select the `LiveSubtitlesMVP` scheme.
+2. Open `Speechara.xcodeproj` in Xcode.
+3. Select the `Speechara` scheme.
 4. Press `Cmd+R` or use `Product > Run`.
 
 To enable live transcription in local development, add this environment variable in your Run scheme:
@@ -63,7 +63,7 @@ That fixed path is the recommended app to launch when testing screen/system audi
 Optional terminal helpers:
 
 ```bash
-open /Users/alexdem/projects/MacOsApp/LiveSubtitlesMVP.xcodeproj
+open /Users/alexdem/projects/MacOsApp/Speechara.xcodeproj
 ```
 
 If terminal builds point to Command Line Tools instead of full Xcode, switch the active developer directory after installing Xcode:
@@ -89,6 +89,8 @@ To produce a drag-to-install `.dmg` that includes the app on the left and an `Ap
 ./Scripts/create_dmg.sh
 ```
 
+From Xcode you can also select the shared `Package DMG` scheme and press `Product > Build` (`Cmd+B`). That scheme builds the Release app, packages the DMG, and then reveals the finished file in Finder without opening the image.
+
 The script builds the `Release` app, generates a simple installer background, configures the Finder window layout, and writes the final artifact to:
 
 ```bash
@@ -101,6 +103,7 @@ Useful options:
 ./Scripts/create_dmg.sh --unsigned
 ./Scripts/create_dmg.sh --app /absolute/path/to/Speechara.app --skip-build
 ./Scripts/create_dmg.sh --no-layout
+./Scripts/create_dmg.sh --reveal
 ```
 
 Notes:

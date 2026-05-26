@@ -16,8 +16,8 @@
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "A10000000000000000000001"
                BuildableName = "Speechara.app"
-               BlueprintName = "LiveSubtitlesMVP"
-               ReferencedContainer = "container:LiveSubtitlesMVP.xcodeproj">
+               BlueprintName = "Speechara"
+               ReferencedContainer = "container:Speechara.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -46,8 +46,8 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A10000000000000000000001"
             BuildableName = "Speechara.app"
-            BlueprintName = "LiveSubtitlesMVP"
-            ReferencedContainer = "container:LiveSubtitlesMVP.xcodeproj">
+            BlueprintName = "Speechara"
+            ReferencedContainer = "container:Speechara.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -63,8 +63,8 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A10000000000000000000001"
             BuildableName = "Speechara.app"
-            BlueprintName = "LiveSubtitlesMVP"
-            ReferencedContainer = "container:LiveSubtitlesMVP.xcodeproj">
+            BlueprintName = "Speechara"
+            ReferencedContainer = "container:Speechara.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

@@ -8,6 +8,32 @@ enum SubtitleStatus: String {
     case stopped = "Stopped"
 }
 
+enum ListeningSessionStartMode: Equatable {
+    case newSession
+    case continuePrevious
+}
+
+@MainActor
+private enum ListeningSessionStartPrompt {
+    static func ask() -> ListeningSessionStartMode {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = SL("Start listening?")
+        alert.informativeText = SL("Start a new session or continue the previous one?")
+        alert.addButton(withTitle: SL("Start New"))
+        alert.addButton(withTitle: SL("Continue"))
+
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+
+        if response == .alertFirstButtonReturn {
+            return .newSession
+        }
+
+        return .continuePrevious
+    }
+}
+
 enum SourceLanguageOption: String, CaseIterable, Identifiable {
     case english
     case russian
@@ -407,6 +433,10 @@ final class SubtitleViewModel: ObservableObject {
         !isSystemAudioListening && !isBusy
     }
 
+    var canStartAudioOnlyListening: Bool {
+        !hasActiveSession && !isBusy && !isMicrophoneBusy
+    }
+
     var canStopSystemListening: Bool {
         isSystemAudioListening && !isBusy
     }
@@ -648,7 +678,20 @@ final class SubtitleViewModel: ObservableObject {
         return FileManager.default.fileExists(atPath: lastRecordingPath)
     }
 
+    func promptAndStartListening(includeMicrophone: Bool = false) {
+        guard !isSystemAudioListening, !isBusy else {
+            return
+        }
+
+        let startMode = ListeningSessionStartPrompt.ask()
+        startListening(mode: startMode, includeMicrophone: includeMicrophone)
+    }
+
     func startListening(includeMicrophone: Bool = false) {
+        startListening(mode: .continuePrevious, includeMicrophone: includeMicrophone)
+    }
+
+    func startListening(mode: ListeningSessionStartMode, includeMicrophone: Bool = false) {
         guard !isSystemAudioListening, !isBusy else {
             return
         }
@@ -663,32 +706,50 @@ final class SubtitleViewModel: ObservableObject {
             }
 
             do {
-                try await ensureStreamingSessionStarted()
-                try await systemAudioCaptureService.startCapture(recordAudio: false)
-                isSystemAudioListening = true
-                status = .listening
-                meetingHistoryStartedAt = meetingHistoryStartedAt ?? Date()
-                meetingHistorySource = includeMicrophone ? "system_audio+microphone" : "system_audio"
-                markBillingUsageStartedIfNeeded()
-                scheduleMeetingHistorySessionStartIfNeeded()
-
-                if includeMicrophone && !isMicrophoneListening {
-                    do {
-                        try await enableMicrophoneListening()
-                    } catch {
-                        await mixedAudioStreamMixer.setMicrophoneEnabled(false)
-                        stopMicrophoneCaptureIfPossible(force: true)
-                        isMicrophoneListening = false
-                        updateMicrophoneLiveHandler()
-                        errorMessage = error.localizedDescription
-                    }
+                if mode == .newSession {
+                    try await prepareNewListeningSession()
                 }
+
+                try await startSystemAudioListening(includeMicrophone: includeMicrophone)
             } catch {
                 errorMessage = error.localizedDescription
 
                 if !hasActiveAudioSource {
                     status = .idle
                 }
+            }
+        }
+    }
+
+    private func prepareNewListeningSession() async throws {
+        if hasActiveSession {
+            await stopStreamingSession(markStopped: false, persistHistoryAsActive: false)
+        }
+
+        await completeMeetingHistoryConversationIfNeeded()
+        resetMeetingHistoryState()
+        clearCurrentSessionForNewSession()
+    }
+
+    private func startSystemAudioListening(includeMicrophone: Bool) async throws {
+        try await ensureStreamingSessionStarted()
+        try await systemAudioCaptureService.startCapture(recordAudio: false)
+        isSystemAudioListening = true
+        status = .listening
+        meetingHistoryStartedAt = meetingHistoryStartedAt ?? Date()
+        meetingHistorySource = includeMicrophone ? "system_audio+microphone" : "system_audio"
+        markBillingUsageStartedIfNeeded()
+        scheduleMeetingHistorySessionStartIfNeeded()
+
+        if includeMicrophone && !isMicrophoneListening {
+            do {
+                try await enableMicrophoneListening()
+            } catch {
+                await mixedAudioStreamMixer.setMicrophoneEnabled(false)
+                stopMicrophoneCaptureIfPossible(force: true)
+                isMicrophoneListening = false
+                updateMicrophoneLiveHandler()
+                errorMessage = error.localizedDescription
             }
         }
     }
@@ -731,6 +792,65 @@ final class SubtitleViewModel: ObservableObject {
             }
 
             await stopSystemAudioListening(markStopped: true)
+        }
+    }
+
+    func showErrorMessage(_ message: String) {
+        errorMessage = message
+    }
+
+    func startAudioOnlyListening() {
+        guard canStartAudioOnlyListening else {
+            return
+        }
+
+        isBusy = true
+        isMicrophoneBusy = true
+        errorMessage = nil
+        translationMessage = nil
+
+        Task { @MainActor in
+            defer {
+                isBusy = false
+                isMicrophoneBusy = false
+            }
+
+            do {
+                try await ensureStreamingSessionStarted()
+                try await enableMicrophoneListening()
+                meetingHistoryStartedAt = meetingHistoryStartedAt ?? Date()
+                meetingHistorySource = "microphone"
+                scheduleMeetingHistorySessionStartIfNeeded()
+            } catch {
+                await mixedAudioStreamMixer.setMicrophoneEnabled(false)
+                stopMicrophoneCaptureIfPossible(force: true)
+                isMicrophoneListening = false
+                updateMicrophoneLiveHandler()
+                errorMessage = error.localizedDescription
+
+                if !hasActiveAudioSource {
+                    status = .idle
+                }
+            }
+        }
+    }
+
+    func stopActiveSession() {
+        guard hasActiveSession, !isBusy, !isMicrophoneBusy else {
+            return
+        }
+
+        isBusy = true
+        isMicrophoneBusy = true
+        errorMessage = nil
+
+        Task { @MainActor in
+            defer {
+                isBusy = false
+                isMicrophoneBusy = false
+            }
+
+            await stopStreamingSession(markStopped: true)
         }
     }
 

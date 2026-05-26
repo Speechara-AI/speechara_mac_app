@@ -3,6 +3,8 @@ import SwiftUI
 struct SpeecharaSettingsView: View {
     @EnvironmentObject private var localizationStore: SpeecharaLocalizationStore
     @AppStorage("speechara.appearanceMode") private var appearanceModeRawValue = SpeecharaAppearanceMode.system.rawValue
+    @State private var authBackendBaseURL = ""
+    @State private var microsoftClientID = ""
 
     private var appearanceSelection: Binding<SpeecharaAppearanceMode> {
         Binding(
@@ -64,10 +66,49 @@ struct SpeecharaSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                Section("Authentication") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        TextField("Auth backend URL", text: $authBackendBaseURL)
+                            .textFieldStyle(.roundedBorder)
+
+                        Text("Defaults to https://api.speechara.ai. Use this only for local or staging backends.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        TextField("Microsoft client ID", text: $microsoftClientID)
+                            .textFieldStyle(.roundedBorder)
+
+                        Text("Required for Microsoft desktop sign-in. It must match the Microsoft client ID configured on the backend.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Button("Save authentication settings") {
+                        saveAuthenticationSettings()
+                    }
+                }
             }
             .formStyle(.grouped)
         }
         .padding(20)
-        .frame(width: 520, height: 250)
+        .frame(width: 560, height: 430)
+        .onAppear {
+            loadAuthenticationSettings()
+        }
+    }
+
+    private func loadAuthenticationSettings() {
+        authBackendBaseURL = AppConfigurationStore.shared.savedValue(for: .authBackendBaseURL)
+            ?? AppConfigurationKind.authBackendBaseURL.defaultValue
+            ?? ""
+        microsoftClientID = AppConfigurationStore.shared.savedValue(for: .microsoftClientID) ?? ""
+    }
+
+    private func saveAuthenticationSettings() {
+        AppConfigurationStore.shared.save(authBackendBaseURL, for: .authBackendBaseURL)
+        AppConfigurationStore.shared.save(microsoftClientID, for: .microsoftClientID)
     }
 }

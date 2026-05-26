@@ -4,6 +4,7 @@ enum DeepgramLiveTranscriptionError: LocalizedError {
     case authenticationRequired
     case invalidRequest
     case alreadyConnected
+    case connectionFailed(String)
     case sendFailed(Error)
     case receiveFailed(Error)
     case serverError(String)
@@ -16,6 +17,8 @@ enum DeepgramLiveTranscriptionError: LocalizedError {
             return "The app could not create the live transcription request."
         case .alreadyConnected:
             return "Live transcription is already connected."
+        case .connectionFailed(let message):
+            return "The app could not open the live transcription connection: \(message)"
         case .sendFailed(let error):
             return "The app could not stream audio for transcription: \(error.localizedDescription)"
         case .receiveFailed(let error):
@@ -23,6 +26,120 @@ enum DeepgramLiveTranscriptionError: LocalizedError {
         case .serverError(let message):
             return "The transcription service returned an error: \(message)"
         }
+    }
+}
+
+private enum DeepgramWebSocketOpenError: LocalizedError {
+    case timedOut
+    case closed(URLSessionWebSocketTask.CloseCode, String?)
+    case transport(Error)
+
+    var errorDescription: String? {
+        switch self {
+        case .timedOut:
+            return "The transcription service did not accept the connection in time."
+        case .closed(let code, let reason):
+            if let reason, !reason.isEmpty {
+                return "The transcription service closed the connection before it was ready. Code \(code.rawValue): \(reason)"
+            }
+
+            return "The transcription service closed the connection before it was ready. Code \(code.rawValue)."
+        case .transport(let error):
+            return error.localizedDescription
+        }
+    }
+}
+
+private final class DeepgramWebSocketOpenObserver: NSObject, URLSessionWebSocketDelegate, URLSessionTaskDelegate {
+    private let lock = NSLock()
+    private var continuations = [Int: CheckedContinuation<Void, Error>]()
+    private var completedTaskIDs = Set<Int>()
+    private var completedResults = [Int: Result<Void, Error>]()
+
+    func prepare(for taskIdentifier: Int) {
+        lock.lock()
+        continuations.removeValue(forKey: taskIdentifier)
+        completedTaskIDs.remove(taskIdentifier)
+        completedResults.removeValue(forKey: taskIdentifier)
+        lock.unlock()
+    }
+
+    func waitForOpen(taskIdentifier: Int, timeout: TimeInterval = 8) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+
+            if let result = completedResults.removeValue(forKey: taskIdentifier) {
+                lock.unlock()
+                continuation.resume(with: result)
+                return
+            }
+
+            continuations[taskIdentifier] = continuation
+            lock.unlock()
+
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + timeout) { [weak self] in
+                self?.complete(
+                    taskIdentifier: taskIdentifier,
+                    with: .failure(DeepgramWebSocketOpenError.timedOut)
+                )
+            }
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didOpenWithProtocol protocol: String?
+    ) {
+        complete(taskIdentifier: webSocketTask.taskIdentifier, with: .success(()))
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
+        reason: Data?
+    ) {
+        let reasonText = reason.flatMap { String(data: $0, encoding: .utf8) }
+        complete(
+            taskIdentifier: webSocketTask.taskIdentifier,
+            with: .failure(DeepgramWebSocketOpenError.closed(closeCode, reasonText))
+        )
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        guard let error else {
+            return
+        }
+
+        complete(
+            taskIdentifier: task.taskIdentifier,
+            with: .failure(DeepgramWebSocketOpenError.transport(error))
+        )
+    }
+
+    private func complete(taskIdentifier: Int, with result: Result<Void, Error>) {
+        lock.lock()
+
+        guard !completedTaskIDs.contains(taskIdentifier) else {
+            lock.unlock()
+            return
+        }
+
+        completedTaskIDs.insert(taskIdentifier)
+
+        if let continuation = continuations.removeValue(forKey: taskIdentifier) {
+            lock.unlock()
+            continuation.resume(with: result)
+            return
+        }
+
+        completedResults[taskIdentifier] = result
+        lock.unlock()
     }
 }
 
@@ -38,6 +155,7 @@ struct DeepgramTranscriptResult: Sendable {
 
 actor DeepgramLiveTranscriptionService {
     private let session: URLSession
+    private let webSocketOpenObserver: DeepgramWebSocketOpenObserver?
     private let proxyService: SpeecharaBackendProxyService
 
     private var webSocketTask: URLSessionWebSocketTask?
@@ -49,10 +167,22 @@ actor DeepgramLiveTranscriptionService {
     private var isStopping = false
 
     init(
-        session: URLSession = .shared,
+        session: URLSession? = nil,
         proxyService: SpeecharaBackendProxyService = SpeecharaBackendProxyService()
     ) {
-        self.session = session
+        if let session {
+            self.session = session
+            self.webSocketOpenObserver = nil
+        } else {
+            let webSocketOpenObserver = DeepgramWebSocketOpenObserver()
+            self.webSocketOpenObserver = webSocketOpenObserver
+            self.session = URLSession(
+                configuration: .default,
+                delegate: webSocketOpenObserver,
+                delegateQueue: nil
+            )
+        }
+
         self.proxyService = proxyService
     }
 
@@ -90,8 +220,17 @@ actor DeepgramLiveTranscriptionService {
         self.isStopping = false
 
         let webSocketTask = session.webSocketTask(with: request)
+        webSocketOpenObserver?.prepare(for: webSocketTask.taskIdentifier)
         self.webSocketTask = webSocketTask
         webSocketTask.resume()
+
+        do {
+            try await webSocketOpenObserver?.waitForOpen(taskIdentifier: webSocketTask.taskIdentifier)
+        } catch {
+            webSocketTask.cancel(with: .goingAway, reason: nil)
+            cleanup()
+            throw DeepgramLiveTranscriptionError.connectionFailed(error.localizedDescription)
+        }
 
         startReceiveLoop(for: webSocketTask)
         startKeepAliveLoop(for: webSocketTask)

@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-PROJECT_PATH="${PROJECT_PATH:-${REPO_ROOT}/LiveSubtitlesMVP.xcodeproj}"
-SCHEME="${SCHEME:-LiveSubtitlesMVP}"
+PROJECT_PATH="${PROJECT_PATH:-${REPO_ROOT}/Speechara.xcodeproj}"
+SCHEME="${SCHEME:-Speechara}"
 CONFIGURATION="${CONFIGURATION:-Release}"
 PRODUCT_NAME="${PRODUCT_NAME:-Speechara}"
 VOLUME_NAME="${VOLUME_NAME:-${PRODUCT_NAME}}"
@@ -19,6 +19,7 @@ SKIP_BUILD=0
 USE_LAYOUT=1
 USE_BACKGROUND=1
 BUILD_UNSIGNED=0
+REVEAL_OUTPUT=0
 
 usage() {
   cat <<EOF
@@ -36,6 +37,7 @@ Options:
   --background PATH  Use a custom PNG/JPG/TIFF background image.
   --no-background    Skip the background image entirely.
   --no-layout        Skip Finder layout customization. Useful in headless CI.
+  --reveal           Reveal the finished DMG in Finder without opening it.
   -h, --help         Show this help message.
 EOF
 }
@@ -43,6 +45,25 @@ EOF
 fail() {
   echo "Error: $*" >&2
   exit 1
+}
+
+reveal_in_finder() {
+  local target_path="$1"
+
+  if /usr/bin/osascript - "${target_path}" <<'APPLESCRIPT' >/dev/null 2>&1
+on run argv
+  set targetFile to POSIX file (item 1 of argv) as alias
+  tell application "Finder"
+    reveal targetFile
+    activate
+  end tell
+end run
+APPLESCRIPT
+  then
+    return 0
+  fi
+
+  open -R "${target_path}" >/dev/null 2>&1 || true
 }
 
 require_value() {
@@ -92,6 +113,10 @@ while [ $# -gt 0 ]; do
       ;;
     --no-layout)
       USE_LAYOUT=0
+      shift
+      ;;
+    --reveal)
+      REVEAL_OUTPUT=1
       shift
       ;;
     -h|--help)
@@ -196,6 +221,8 @@ if [ "${USE_BACKGROUND}" -eq 1 ]; then
   fi
 fi
 
+chflags hidden "${STAGING_DIR}/.background" >/dev/null 2>&1 || true
+
 hdiutil create \
   -volname "${VOLUME_NAME}" \
   -srcfolder "${STAGING_DIR}" \
@@ -221,8 +248,18 @@ if [ -z "${DEVICE}" ]; then
 fi
 
 if [ "${USE_LAYOUT}" -eq 1 ]; then
+  if [ -d "${MOUNT_PATH}/.background" ]; then
+    chflags hidden "${MOUNT_PATH}/.background" >/dev/null 2>&1 || true
+  fi
+  if [ -d "${MOUNT_PATH}/.fseventsd" ]; then
+    chflags hidden "${MOUNT_PATH}/.fseventsd" >/dev/null 2>&1 || true
+  fi
+  if [ -d "${MOUNT_PATH}/.Trashes" ]; then
+    chflags hidden "${MOUNT_PATH}/.Trashes" >/dev/null 2>&1 || true
+  fi
+
   if [ -n "${BACKGROUND_FILE_NAME}" ]; then
-    if ! osascript "${SCRIPT_DIR}/configure_dmg_layout.applescript" "${VOLUME_NAME}" "${APP_BUNDLE_NAME}" "${MOUNT_PATH}/.background/${BACKGROUND_FILE_NAME}"; then
+    if ! osascript "${SCRIPT_DIR}/configure_dmg_layout.applescript" "${VOLUME_NAME}" "${APP_BUNDLE_NAME}" ".background:${BACKGROUND_FILE_NAME}"; then
       fail "Finder layout customization failed. Re-run with --no-layout in headless environments."
     fi
   else
@@ -234,12 +271,30 @@ if [ "${USE_LAYOUT}" -eq 1 ]; then
   if ! bless --folder "${MOUNT_PATH}" --openfolder "${MOUNT_PATH}" >/dev/null 2>&1; then
     echo "Skipping bless --openfolder for ${MOUNT_PATH}" >&2
   fi
+
+  for _ in 1 2 3 4 5; do
+    if [ -f "${MOUNT_PATH}/.DS_Store" ]; then
+      cp "${MOUNT_PATH}/.DS_Store" "${STAGING_DIR}/.DS_Store"
+      break
+    fi
+    sleep 1
+  done
 fi
 
 sync
 hdiutil detach "${DEVICE}" -quiet >/dev/null
 DEVICE=""
 
-hdiutil convert "${TEMP_DMG_PATH}" -format UDZO -imagekey zlib-level=9 -o "${FINAL_DMG_PATH}" >/dev/null
+hdiutil create \
+  -volname "${VOLUME_NAME}" \
+  -srcfolder "${STAGING_DIR}" \
+  -fs HFS+ \
+  -format UDZO \
+  -imagekey zlib-level=9 \
+  "${FINAL_DMG_PATH}" >/dev/null
+
+if [ "${REVEAL_OUTPUT}" -eq 1 ]; then
+  reveal_in_finder "${FINAL_DMG_PATH}"
+fi
 
 echo "Created ${FINAL_DMG_PATH}"

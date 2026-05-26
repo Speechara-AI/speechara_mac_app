@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var viewModel = SubtitleViewModel()
+    @EnvironmentObject private var authStore: AuthSessionStore
+    @EnvironmentObject private var viewModel: SubtitleViewModel
     @AppStorage("speechara.focusModeEnabled") private var isFocusModeEnabled = false
     @AppStorage("speechara.livePreviewVisible") private var isLivePreviewVisible = true
     @State private var isListeningSetupPresented = false
@@ -57,7 +58,7 @@ struct ContentView: View {
             }
 
             shouldStartListeningAfterSetup = false
-            viewModel.startListening(includeMicrophone: viewModel.startsWithMicrophoneEnabled)
+            startListeningAfterAuthRefresh()
         }
         .onAppear {
             viewModel.setFocusModeEnabled(isFocusModeEnabled)
@@ -118,7 +119,7 @@ struct ContentView: View {
                     HStack(alignment: .center, spacing: 12) {
                         PrimaryActionButton(
                             title: primaryActionTitle,
-                            subtitle: viewModel.isSystemAudioListening ? nil : "system audio",
+                            subtitle: viewModel.hasActiveSession ? nil : SL("system audio"),
                             systemImage: primaryActionIcon,
                             tint: primaryActionTint,
                             action: handlePrimaryAction
@@ -557,16 +558,8 @@ struct ContentView: View {
             return SL("Preparing session")
         }
 
-        if viewModel.isSystemAudioListening && viewModel.isMicrophoneListening {
-            return SL("System + microphone live")
-        }
-
-        if viewModel.isSystemAudioListening {
-            return SL("Live listening")
-        }
-
-        if viewModel.isMicrophoneListening {
-            return SL("Microphone live")
+        if viewModel.hasActiveSession {
+            return SL("Listening")
         }
 
         if viewModel.status == .stopped {
@@ -609,33 +602,53 @@ struct ContentView: View {
     }
 
     private var primaryActionTitle: String {
-        viewModel.isSystemAudioListening ? SL("Stop Listening") : SL("Start Listening")
+        viewModel.hasActiveSession ? SL("Stop Listening") : SL("Start Listening")
     }
 
     private var primaryActionIcon: String {
-        viewModel.isSystemAudioListening ? "stop.fill" : "play.fill"
+        viewModel.hasActiveSession ? "stop.fill" : "play.fill"
     }
 
     private var primaryActionTint: Color {
-        viewModel.isSystemAudioListening
+        viewModel.hasActiveSession
             ? Color(red: 0.84, green: 0.16, blue: 0.17)
             : Color(red: 0.12, green: 0.70, blue: 0.39)
     }
 
     private var primaryActionDisabled: Bool {
-        viewModel.isSystemAudioListening ? !viewModel.canStopSystemListening : !viewModel.canStartSystemListening
+        viewModel.hasActiveSession
+            ? viewModel.isBusy || viewModel.isMicrophoneBusy
+            : authStore.isRestoringSession || !authStore.isAuthenticated || !viewModel.canStartSystemListening
     }
 
     private func handlePrimaryAction() {
-        if viewModel.isSystemAudioListening {
-            viewModel.stopListening()
+        if viewModel.hasActiveSession {
+            viewModel.stopActiveSession()
             return
         }
 
-        if viewModel.hasActiveSession {
-            viewModel.startListening(includeMicrophone: viewModel.startsWithMicrophoneEnabled)
-        } else {
-            isListeningSetupPresented = true
+        prepareListeningSetupAfterAuthRefresh()
+    }
+
+    private func prepareListeningSetupAfterAuthRefresh() {
+        Task { @MainActor in
+            do {
+                try await authStore.ensureActiveSession()
+                isListeningSetupPresented = true
+            } catch {
+                viewModel.showErrorMessage(authStore.errorMessage ?? error.localizedDescription)
+            }
+        }
+    }
+
+    private func startListeningAfterAuthRefresh() {
+        Task { @MainActor in
+            do {
+                try await authStore.ensureActiveSession()
+                viewModel.promptAndStartListening(includeMicrophone: viewModel.startsWithMicrophoneEnabled)
+            } catch {
+                viewModel.showErrorMessage(authStore.errorMessage ?? error.localizedDescription)
+            }
         }
     }
 
@@ -1557,7 +1570,7 @@ private struct ListeningSetupSheet: View {
                                     .fontWeight(.semibold)
                                     .foregroundStyle(.primary)
 
-                                Text("Choose the input language, decide whether to start with your microphone live, save the session as M4A, and turn translation on only when you need it.")
+                                Text("Choose the input language, decide whether to mix in your microphone, save the session as M4A, and turn translation on only when you need it.")
                                     .foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
@@ -1585,12 +1598,45 @@ private struct ListeningSetupSheet: View {
                             ListeningSetupCard(
                                 iconName: "mic.fill",
                                 accentColor: Color(red: 0.79, green: 0.23, blue: 0.28),
-                                title: "Start with microphone",
-                                subtitle: "Begin the session with your voice mixed in right away. We will remember this choice next time."
+                                title: "Microphone mix-in",
+                                subtitle: "Add your own voice through the selected input device."
                             ) {
-                                Toggle("", isOn: $viewModel.startsWithMicrophoneEnabled)
-                                    .labelsHidden()
-                                    .toggleStyle(.switch)
+                                VStack(alignment: .trailing, spacing: 10) {
+                                    Toggle("", isOn: $viewModel.startsWithMicrophoneEnabled)
+                                        .labelsHidden()
+                                        .toggleStyle(.switch)
+
+                                    Menu {
+                                        Button(SL("Refresh microphones")) {
+                                            viewModel.refreshAvailableMicrophones()
+                                        }
+
+                                        Divider()
+
+                                        if viewModel.hasAvailableMicrophones {
+                                            ForEach(viewModel.availableMicrophones) { device in
+                                                Button {
+                                                    viewModel.selectMicrophone(device.id)
+                                                } label: {
+                                                    Label(
+                                                        device.name,
+                                                        systemImage: device.id == viewModel.selectedMicrophoneID ? "checkmark" : "mic"
+                                                    )
+                                                }
+                                            }
+                                        } else {
+                                            Button(SL("No microphone devices available")) {}
+                                                .disabled(true)
+                                        }
+                                    } label: {
+                                        Label(viewModel.selectedMicrophoneName, systemImage: "mic.fill")
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.78)
+                                    }
+                                    .frame(width: 190)
+                                    .disabled(!viewModel.startsWithMicrophoneEnabled)
+                                    .opacity(viewModel.startsWithMicrophoneEnabled ? 1 : 0.45)
+                                }
                             }
 
                             ListeningSetupCard(

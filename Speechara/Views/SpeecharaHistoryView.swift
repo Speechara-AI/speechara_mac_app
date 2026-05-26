@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 private enum SpeecharaHistoryTheme {
@@ -46,6 +47,36 @@ private enum SpeecharaHistoryTheme {
         light: SpeecharaRGBA(0.58, 0.70, 0.88),
         dark: SpeecharaRGBA(0.52, 0.72, 0.96)
     )
+}
+
+private enum SpeecharaHistoryDetailTab: String, CaseIterable, Identifiable {
+    case transcribe
+    case translate
+    case summary
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .transcribe:
+            return "Transcribe"
+        case .translate:
+            return "Translate"
+        case .summary:
+            return "Summary"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .transcribe:
+            return "text.alignleft"
+        case .translate:
+            return "globe"
+        case .summary:
+            return "sparkles"
+        }
+    }
 }
 
 struct SpeecharaHistoryView: View {
@@ -228,15 +259,24 @@ final class SpeecharaHistoryViewModel: ObservableObject {
     @Published private(set) var selectedSessionDetail: MeetingSessionHistoryDetail?
     @Published private(set) var isLoadingDetail = false
     @Published private(set) var detailErrorMessage: String?
+    @Published private(set) var isSummaryLoading = false
+    @Published private(set) var detailSummaryText: String?
+    @Published private(set) var summaryErrorMessage: String?
+    @Published fileprivate var selectedDetailTab: SpeecharaHistoryDetailTab = .transcribe
     @Published var isDetailPresented = false
 
     private let historyService: MeetingSessionHistoryService
+    private let deepSeekSummaryService: DeepSeekSummaryService
     private var hasLoadedInitialPage = false
     private var lastAppliedNormalizedQuery: String?
     private var searchReloadTask: Task<Void, Never>?
 
-    init(historyService: MeetingSessionHistoryService = MeetingSessionHistoryService()) {
+    init(
+        historyService: MeetingSessionHistoryService = MeetingSessionHistoryService(),
+        deepSeekSummaryService: DeepSeekSummaryService = DeepSeekSummaryService()
+    ) {
         self.historyService = historyService
+        self.deepSeekSummaryService = deepSeekSummaryService
     }
 
     deinit {
@@ -283,6 +323,9 @@ final class SpeecharaHistoryViewModel: ObservableObject {
         selectedSessionSummary = item
         selectedSessionDetail = nil
         detailErrorMessage = nil
+        detailSummaryText = nil
+        summaryErrorMessage = nil
+        selectedDetailTab = .transcribe
         isLoadingDetail = true
         isDetailPresented = true
 
@@ -291,7 +334,9 @@ final class SpeecharaHistoryViewModel: ObservableObject {
         }
 
         do {
-            selectedSessionDetail = try await historyService.fetchSessionDetail(id: item.id)
+            let detail = try await historyService.fetchSessionDetail(id: item.id)
+            selectedSessionDetail = detail
+            detailSummaryText = detail.summaryText?.nilIfEmpty
         } catch {
             detailErrorMessage = error.localizedDescription
         }
@@ -305,12 +350,67 @@ final class SpeecharaHistoryViewModel: ObservableObject {
         await openSession(selectedSessionSummary)
     }
 
+    func copySelectedTranscriptToPasteboard() {
+        guard let transcriptText = selectedSessionDetail?.copyableTranscriptText else {
+            return
+        }
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(transcriptText, forType: .string)
+    }
+
+    func visibleSummaryText(for detail: MeetingSessionHistoryDetail) -> String? {
+        detailSummaryText?.nilIfEmpty ?? detail.summaryText?.nilIfEmpty
+    }
+
+    func summarizeSelectedTranscript() {
+        guard !isSummaryLoading,
+              let detail = selectedSessionDetail,
+              let transcriptText = detail.copyableTranscriptText else {
+            return
+        }
+
+        isSummaryLoading = true
+        summaryErrorMessage = nil
+        selectedDetailTab = .summary
+
+        Task { @MainActor in
+            defer {
+                isSummaryLoading = false
+            }
+
+            let summaryText: String
+            do {
+                summaryText = try await deepSeekSummaryService.summarize(
+                    transcript: transcriptText,
+                    inputLanguageName: detail.summaryLanguageName,
+                    outputLanguageName: detail.summaryLanguageName
+                )
+            } catch {
+                summaryText = Self.localFallbackSummary(from: transcriptText)
+                if selectedSessionDetail?.id == detail.id {
+                    summaryErrorMessage = SL("AI summary failed, showing a local fallback instead.")
+                }
+            }
+
+            if selectedSessionDetail?.id == detail.id {
+                detailSummaryText = summaryText
+            }
+
+            await persistSummary(summaryText, basedOn: detail)
+        }
+    }
+
     func dismissDetail() {
         isDetailPresented = false
         selectedSessionSummary = nil
         selectedSessionDetail = nil
         detailErrorMessage = nil
+        detailSummaryText = nil
+        summaryErrorMessage = nil
+        selectedDetailTab = .transcribe
         isLoadingDetail = false
+        isSummaryLoading = false
     }
 
     private func scheduleSearchReload() {
@@ -358,6 +458,80 @@ final class SpeecharaHistoryViewModel: ObservableObject {
             nextCursor = nil
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func persistSummary(_ summaryText: String, basedOn detail: MeetingSessionHistoryDetail) async {
+        do {
+            _ = try await historyService.updateSession(
+                id: detail.id,
+                revision: detail.revision,
+                snapshot: detail.snapshot(replacingSummaryText: summaryText)
+            )
+
+            await refreshListAfterSummarySave()
+
+            guard selectedSessionDetail?.id == detail.id else {
+                return
+            }
+
+            let refreshedDetail = try await historyService.fetchSessionDetail(id: detail.id)
+            guard selectedSessionDetail?.id == detail.id else {
+                return
+            }
+
+            selectedSessionDetail = refreshedDetail
+            detailSummaryText = refreshedDetail.summaryText?.nilIfEmpty ?? summaryText
+        } catch {
+            if selectedSessionDetail?.id == detail.id {
+                appendSummaryError(SLF("Summary generated, but could not be saved: %@", error.localizedDescription))
+            }
+        }
+    }
+
+    private func appendSummaryError(_ message: String) {
+        if let summaryErrorMessage, !summaryErrorMessage.isEmpty {
+            self.summaryErrorMessage = "\(summaryErrorMessage)\n\(message)"
+        } else {
+            summaryErrorMessage = message
+        }
+    }
+
+    private func refreshListAfterSummarySave() async {
+        do {
+            let page = try await historyService.fetchSessions(
+                query: makeListQuery(cursor: nil)
+            )
+
+            sessions = page.items
+            nextCursor = page.nextCursor
+            errorMessage = nil
+            lastAppliedNormalizedQuery = normalizedSearchText
+
+            if let selectedSessionSummary,
+               let refreshedSummary = sessions.first(where: { $0.id == selectedSessionSummary.id }) {
+                self.selectedSessionSummary = refreshedSummary
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private static func localFallbackSummary(from transcript: String) -> String {
+        let lines = transcript
+            .components(separatedBy: .newlines)
+            .map { line in
+                line
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .removingLeadingTimestamp
+            }
+            .filter { !$0.isEmpty }
+
+        let bullets = Array(lines.prefix(12))
+        guard !bullets.isEmpty else {
+            return transcript
+        }
+
+        return bullets.map { "- \($0)" }.joined(separator: "\n")
     }
 
     private var normalizedSearchText: String? {
@@ -525,31 +699,34 @@ private struct SpeecharaHistoryDetailSheet: View {
             )
             .ignoresSafeArea()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    detailHeader
+            VStack(alignment: .leading, spacing: 18) {
+                detailHeader
 
-                    if viewModel.isLoadingDetail && viewModel.selectedSessionDetail == nil {
-                        SpeecharaHistoryLoadingCard(text: "Loading full session…")
-                    } else if let detailErrorMessage = viewModel.detailErrorMessage,
-                              viewModel.selectedSessionDetail == nil {
-                        SpeecharaHistoryErrorCard(
-                            text: detailErrorMessage,
-                            retryTitle: "Retry"
-                        ) {
-                            Task {
-                                await viewModel.retrySelectedSession()
-                            }
+                if viewModel.isLoadingDetail && viewModel.selectedSessionDetail == nil {
+                    SpeecharaHistoryLoadingCard(text: "Loading full session…")
+                } else if let detailErrorMessage = viewModel.detailErrorMessage,
+                          viewModel.selectedSessionDetail == nil {
+                    SpeecharaHistoryErrorCard(
+                        text: detailErrorMessage,
+                        retryTitle: "Retry"
+                    ) {
+                        Task {
+                            await viewModel.retrySelectedSession()
                         }
-                    } else if let detail = viewModel.selectedSessionDetail {
-                        detailContent(detail)
                     }
+                } else if let detail = viewModel.selectedSessionDetail {
+                    SpeecharaHistoryDetailTabBar(selection: $viewModel.selectedDetailTab)
+
+                    ScrollView {
+                        detailContent(detail)
+                            .padding(.bottom, 28)
+                    }
+                    .scrollIndicators(.hidden)
                 }
-                .padding(28)
-                .frame(maxWidth: 1120, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .scrollIndicators(.hidden)
+            .padding(28)
+            .frame(maxWidth: 1120, maxHeight: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(minWidth: 1120, minHeight: 760)
     }
@@ -600,47 +777,89 @@ private struct SpeecharaHistoryDetailSheet: View {
     @ViewBuilder
     private func detailContent(_ detail: MeetingSessionHistoryDetail) -> some View {
         VStack(alignment: .leading, spacing: 18) {
-            if detail.hasSummary || detail.hasProtocol || detail.hasSuggestedAnswer {
-                detailStateCard(detail)
-            }
+            switch viewModel.selectedDetailTab {
+            case .transcribe:
+                transcriptPanel(detail)
+                compactMetadataFooter(detail)
+            case .translate:
+                translationPanel(detail)
+                compactMetadataFooter(detail)
+            case .summary:
+                summaryPanel(detail)
 
-            SpeecharaHistoryDetailPanel(title: "Transcript") {
-                if let transcriptJson = detail.transcriptJson, !transcriptJson.isEmpty {
-                    SpeecharaTranscriptBlockList(blocks: transcriptJson)
-                } else {
-                    SpeecharaDetailTextContent(text: detail.transcriptText?.nilIfEmpty ?? "Transcript is not available.")
+                if let protocolText = detail.protocolText?.nilIfEmpty {
+                    SpeecharaHistoryDetailPanel(title: "Protocol") {
+                        SpeecharaDetailTextContent(text: protocolText)
+                    }
                 }
-            }
 
-            if detail.translationEnabled || detail.translationText?.nilIfEmpty != nil || !(detail.translationJson ?? []).isEmpty {
-                SpeecharaHistoryDetailPanel(title: "Translation") {
-                    if let translationJson = detail.translationJson, !translationJson.isEmpty {
-                        SpeecharaTranslationBlockList(blocks: translationJson)
-                    } else {
-                        SpeecharaDetailTextContent(text: detail.translationText?.nilIfEmpty ?? "Translation is not available.")
+                if let suggestedAnswerText = detail.suggestedAnswerText?.nilIfEmpty {
+                    SpeecharaHistoryDetailPanel(title: "Suggested reply") {
+                        SpeecharaDetailTextContent(text: suggestedAnswerText)
                     }
                 }
             }
+        }
+    }
 
-            compactMetadataFooter(detail)
+    private func transcriptPanel(_ detail: MeetingSessionHistoryDetail) -> some View {
+        SpeecharaHistoryDetailPanel(
+            title: "Transcript",
+            accessory: {
+                HStack(spacing: 8) {
+                    SpeecharaHistoryPanelActionButton(
+                        title: "Summarize",
+                        systemImage: "sparkles",
+                        isEnabled: detail.copyableTranscriptText != nil && !viewModel.isSummaryLoading,
+                        isLoading: viewModel.isSummaryLoading,
+                        action: viewModel.summarizeSelectedTranscript
+                    )
 
-            if let summaryText = detail.summaryText?.nilIfEmpty {
-                SpeecharaHistoryDetailPanel(title: "Summary") {
-                    SpeecharaDetailTextContent(text: summaryText)
+                    SpeecharaHistoryPanelActionButton(
+                        title: "Copy transcript",
+                        systemImage: "doc.on.doc",
+                        isEnabled: detail.copyableTranscriptText != nil,
+                        action: viewModel.copySelectedTranscriptToPasteboard
+                    )
                 }
             }
-
-            if let protocolText = detail.protocolText?.nilIfEmpty {
-                SpeecharaHistoryDetailPanel(title: "Protocol") {
-                    SpeecharaDetailTextContent(text: protocolText)
-                }
+        ) {
+            if let transcriptJson = detail.transcriptJson, !transcriptJson.isEmpty {
+                SpeecharaTranscriptBlockList(blocks: transcriptJson)
+            } else {
+                SpeecharaDetailTextContent(text: detail.transcriptText?.nilIfEmpty ?? "Transcript is not available.")
             }
+        }
+    }
 
-            if let suggestedAnswerText = detail.suggestedAnswerText?.nilIfEmpty {
-                SpeecharaHistoryDetailPanel(title: "Suggested reply") {
-                    SpeecharaDetailTextContent(text: suggestedAnswerText)
-                }
+    private func translationPanel(_ detail: MeetingSessionHistoryDetail) -> some View {
+        SpeecharaHistoryDetailPanel(title: "Translation") {
+            if let translationJson = detail.translationJson, !translationJson.isEmpty {
+                SpeecharaTranslationBlockList(blocks: translationJson)
+            } else {
+                SpeecharaDetailTextContent(text: detail.translationText?.nilIfEmpty ?? "Translation is not available.")
             }
+        }
+    }
+
+    private func summaryPanel(_ detail: MeetingSessionHistoryDetail) -> some View {
+        SpeecharaHistoryDetailPanel(
+            title: "Summary",
+            accessory: {
+                SpeecharaHistoryPanelActionButton(
+                    title: "Summarize",
+                    systemImage: "sparkles",
+                    isEnabled: detail.copyableTranscriptText != nil && !viewModel.isSummaryLoading,
+                    isLoading: viewModel.isSummaryLoading,
+                    action: viewModel.summarizeSelectedTranscript
+                )
+            }
+        ) {
+            SpeecharaHistorySummaryContent(
+                text: viewModel.visibleSummaryText(for: detail),
+                errorMessage: viewModel.summaryErrorMessage,
+                isLoading: viewModel.isSummaryLoading
+            )
         }
     }
 
@@ -707,15 +926,80 @@ private struct SpeecharaHistoryDetailSheet: View {
     }
 }
 
-private struct SpeecharaHistoryDetailPanel<Content: View>: View {
+private struct SpeecharaHistoryDetailTabBar: View {
+    @Binding var selection: SpeecharaHistoryDetailTab
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(SpeecharaHistoryDetailTab.allCases) { tab in
+                Button {
+                    selection = tab
+                } label: {
+                    Label(SL(tab.title), systemImage: tab.systemImage)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(selection == tab ? SpeecharaHistoryTheme.primaryText : SpeecharaHistoryTheme.secondaryText)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 40)
+                        .background(
+                            RoundedRectangle(cornerRadius: 14)
+                                .fill(selection == tab ? SpeecharaHistoryTheme.cardFill : Color.clear)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14)
+                                .stroke(selection == tab ? SpeecharaHistoryTheme.border : Color.clear, lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help(SL(tab.title))
+            }
+        }
+        .padding(4)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(SpeecharaHistoryTheme.elevatedFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(SpeecharaHistoryTheme.border, lineWidth: 1)
+        )
+    }
+}
+
+private struct SpeecharaHistoryDetailPanel<Accessory: View, Content: View>: View {
     let title: String
-    @ViewBuilder let content: Content
+    private let accessory: Accessory
+    private let content: Content
+
+    init(
+        title: String,
+        @ViewBuilder content: () -> Content
+    ) where Accessory == EmptyView {
+        self.title = title
+        accessory = EmptyView()
+        self.content = content()
+    }
+
+    init(
+        title: String,
+        @ViewBuilder accessory: () -> Accessory,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.accessory = accessory()
+        self.content = content()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(SL(title))
-                .font(.system(size: 20, weight: .bold, design: .rounded))
-                .foregroundStyle(SpeecharaHistoryTheme.primaryText)
+            HStack(alignment: .center, spacing: 12) {
+                Text(SL(title))
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundStyle(SpeecharaHistoryTheme.primaryText)
+
+                Spacer(minLength: 0)
+
+                accessory
+            }
 
             content
         }
@@ -729,6 +1013,46 @@ private struct SpeecharaHistoryDetailPanel<Content: View>: View {
                 .stroke(SpeecharaHistoryTheme.border, lineWidth: 1)
         )
         .shadow(color: Color.black.opacity(0.03), radius: 18, x: 0, y: 10)
+    }
+}
+
+private struct SpeecharaHistoryPanelActionButton: View {
+    let title: String
+    let systemImage: String
+    let isEnabled: Bool
+    var isLoading = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(SpeecharaHistoryTheme.accent)
+                } else {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 13, weight: .semibold))
+                }
+
+                Text(SL(title))
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+            }
+            .foregroundStyle(isEnabled ? SpeecharaHistoryTheme.primaryText : SpeecharaHistoryTheme.tertiaryText)
+            .padding(.horizontal, 14)
+            .frame(height: 34)
+            .background(
+                Capsule()
+                    .fill(SpeecharaHistoryTheme.elevatedFill)
+            )
+            .overlay(
+                Capsule()
+                    .stroke(SpeecharaHistoryTheme.border, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .help(SL(title))
     }
 }
 
@@ -821,6 +1145,45 @@ private struct SpeecharaDetailTextContent: View {
             .foregroundStyle(SpeecharaHistoryTheme.primaryText)
             .frame(maxWidth: .infinity, alignment: .leading)
             .textSelection(.enabled)
+    }
+}
+
+private struct SpeecharaHistorySummaryContent: View {
+    let text: String?
+    let errorMessage: String?
+    let isLoading: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if isLoading {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(SpeecharaHistoryTheme.accent)
+
+                    Text(SL("Summarizing transcript..."))
+                        .font(.system(size: 15, weight: .medium, design: .rounded))
+                        .foregroundStyle(SpeecharaHistoryTheme.secondaryText)
+                }
+            }
+
+            if let errorMessage, !errorMessage.isEmpty {
+                Text(errorMessage)
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                    .foregroundStyle(Color(red: 0.84, green: 0.33, blue: 0.30))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+
+            if let text, !text.isEmpty {
+                SpeecharaDetailTextContent(text: text)
+            } else if !isLoading {
+                Text(SL("No summary yet."))
+                    .font(.system(size: 15, weight: .medium, design: .rounded))
+                    .foregroundStyle(SpeecharaHistoryTheme.secondaryText)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -998,6 +1361,71 @@ private extension MeetingSessionHistoryDetail {
         title?.nilIfEmpty ?? previewText?.nilIfEmpty ?? SL("Untitled")
     }
 
+    var summaryLanguageName: String {
+        Self.deepSeekLanguageName(for: inputLanguage)
+    }
+
+    var copyableTranscriptText: String? {
+        if let transcriptJson, !transcriptJson.isEmpty {
+            let lines = transcriptJson
+                .sorted { first, second in
+                    if first.seq == second.seq {
+                        return first.timestamp < second.timestamp
+                    }
+
+                    return first.seq < second.seq
+                }
+                .compactMap { block -> String? in
+                    let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else {
+                        return nil
+                    }
+
+                    let timestamp = block.timestamp.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let speakerLabel = block.speakerLabel?.nilIfEmpty
+
+                    if let speakerLabel, !timestamp.isEmpty {
+                        return "[\(timestamp)] \(speakerLabel): \(text)"
+                    }
+
+                    if let speakerLabel {
+                        return "\(speakerLabel): \(text)"
+                    }
+
+                    if !timestamp.isEmpty {
+                        return "[\(timestamp)] \(text)"
+                    }
+
+                    return text
+                }
+
+            return lines.joined(separator: "\n").nilIfEmpty
+        }
+
+        return transcriptText?.nilIfEmpty
+    }
+
+    func snapshot(replacingSummaryText summaryText: String) -> MeetingSessionHistorySnapshot {
+        MeetingSessionHistorySnapshot(
+            title: title,
+            startedAt: startedAt,
+            endedAt: endedAt,
+            durationSeconds: durationSeconds,
+            status: snapshotStatus,
+            inputLanguage: inputLanguage?.nilIfEmpty?.lowercased() ?? "en",
+            translationLanguage: translationEnabled ? translationLanguage?.nilIfEmpty?.lowercased() : nil,
+            translationEnabled: translationEnabled,
+            recordingEnabled: recordingEnabled,
+            microphoneLabel: microphoneLabel?.nilIfEmpty,
+            transcriptBlocks: persistedTranscriptBlocks,
+            translationBlocks: persistedTranslationBlocks,
+            summaryText: summaryText.nilIfEmpty,
+            protocolText: protocolText?.nilIfEmpty,
+            suggestedAnswerText: suggestedAnswerText?.nilIfEmpty,
+            sessionParams: persistedSessionParams
+        )
+    }
+
     var durationLabel: String {
         durationSeconds.formattedDuration
     }
@@ -1010,6 +1438,100 @@ private extension MeetingSessionHistoryDetail {
             return SL("Active")
         default:
             return status
+        }
+    }
+
+    private var snapshotStatus: MeetingSessionHistoryStatus {
+        if status.lowercased() == MeetingSessionHistoryStatus.active.rawValue {
+            return .active
+        }
+
+        return .completed
+    }
+
+    private var persistedTranscriptBlocks: [MeetingSessionTranscriptBlock] {
+        if let transcriptJson, !transcriptJson.isEmpty {
+            return transcriptJson
+        }
+
+        let lines = transcriptText?
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty } ?? []
+
+        return lines.enumerated().compactMap { index, line in
+            let components = line.historyTimestampedComponents
+            guard !components.text.isEmpty else {
+                return nil
+            }
+
+            return MeetingSessionTranscriptBlock(
+                id: "history-\(id)-transcript-\(index + 1)",
+                seq: index + 1,
+                timestamp: components.timestamp,
+                speakerLabel: nil,
+                text: components.text
+            )
+        }
+    }
+
+    private var persistedTranslationBlocks: [MeetingSessionTranslationBlock] {
+        if let translationJson, !translationJson.isEmpty {
+            return translationJson
+        }
+
+        guard let translationText = translationText?.nilIfEmpty else {
+            return []
+        }
+
+        let transcriptBlocks = persistedTranscriptBlocks
+        let translationLanguage = translationLanguage?.nilIfEmpty?.lowercased() ?? "translation"
+        let lines = translationText
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        return lines.enumerated().map { index, line in
+            let transcriptBlock = index < transcriptBlocks.count ? transcriptBlocks[index] : nil
+            let seq = transcriptBlock?.seq ?? index + 1
+
+            return MeetingSessionTranslationBlock(
+                transcriptBlockId: transcriptBlock?.id ?? "history-\(id)-transcript-\(seq)",
+                seq: seq,
+                language: translationLanguage,
+                text: line.removingLeadingTimestamp
+            )
+        }
+    }
+
+    private var persistedSessionParams: MeetingSessionHistorySessionParams {
+        sessionParams ?? MeetingSessionHistorySessionParams(
+            client: processedByApp?.nilIfEmpty ?? "macos",
+            source: "history",
+            appVersion: nil,
+            focusMode: nil
+        )
+    }
+
+    private static func deepSeekLanguageName(for languageCode: String?) -> String {
+        let normalizedCode = languageCode?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .split(separator: "-")
+            .first
+            .map(String.init)
+
+        switch normalizedCode {
+        case "ru", "russian":
+            return "Russian"
+        case "de", "german":
+            return "German"
+        case "es", "spanish":
+            return "Spanish"
+        case "fr", "french":
+            return "French"
+        default:
+            return "English"
         }
     }
 }
@@ -1046,5 +1568,30 @@ private extension String {
     var nilIfEmpty: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    var removingLeadingTimestamp: String {
+        historyTimestampedComponents.text
+    }
+
+    var historyTimestampedComponents: (timestamp: String, text: String) {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("["),
+              let closingBracket = trimmed.firstIndex(of: "]") else {
+            return ("00:00:00", trimmed)
+        }
+
+        let timestampStart = trimmed.index(after: trimmed.startIndex)
+        let timestamp = String(trimmed[timestampStart ..< closingBracket])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let textStart = trimmed.index(after: closingBracket)
+        let text = String(trimmed[textStart...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard timestamp.count >= 5 else {
+            return ("00:00:00", trimmed)
+        }
+
+        return (timestamp, text)
     }
 }

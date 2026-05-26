@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-private let speecharaPermissionsOnboardingVersion = 1
+let speecharaPermissionsOnboardingVersion = 1
 
 struct SpeecharaRootView: View {
     @AppStorage("speechara.permissions.onboarding.version") private var permissionsOnboardingVersion = 0
@@ -56,24 +56,14 @@ private struct PermissionsOnboardingView: View {
             permissionsController.refreshStatuses()
         }
         .animation(.spring(response: 0.34, dampingFraction: 0.88), value: permissionsController.microphoneState)
-        .animation(.spring(response: 0.34, dampingFraction: 0.88), value: permissionsController.screenCaptureState)
     }
 
     private var setupColumn: some View {
         VStack(alignment: .leading, spacing: 24) {
             onboardingHero
 
-            if permissionsController.shouldSuggestRelaunch {
-                SetupAlertStrip(
-                    iconName: "arrow.clockwise.circle.fill",
-                    tint: Color(red: 0.19, green: 0.45, blue: 0.95),
-                    text: "macOS approved screen capture for this launch. Restart Speechara once so system audio capture is fully available."
-                )
-            }
-
             VStack(spacing: 16) {
                 microphonePermissionCard
-                screenPermissionCard
             }
 
             footerActions
@@ -116,7 +106,7 @@ private struct PermissionsOnboardingView: View {
                     Text("Prepare Speechara for live capture")
                         .font(.system(size: 40, weight: .bold, design: .rounded))
 
-                    Text("Enable the two macOS permissions that unlock system audio, microphone mix-in, and the full live transcription flow.")
+                    Text("Speechara captures system audio directly, without screen recording. Microphone access is optional for adding your own voice.")
                         .font(.system(size: 16, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -142,8 +132,8 @@ private struct PermissionsOnboardingView: View {
         PermissionAccessCard(
             accent: Color(red: 0.10, green: 0.62, blue: 0.45),
             iconName: "mic.fill",
-            title: "Microphone input",
-            subtitle: "Adds your own voice to the transcript, lets you test the selected mic, and mixes local speech into captured sessions.",
+            title: "Optional microphone input",
+            subtitle: "Lets Speechara add your own voice from the selected microphone when microphone mix-in is enabled.",
             statusTitle: microphoneStatusTitle,
             statusTint: microphoneStatusTint,
             actionTitle: microphoneActionTitle,
@@ -155,24 +145,6 @@ private struct PermissionsOnboardingView: View {
             Task {
                 await permissionsController.requestMicrophoneAccess()
             }
-        }
-    }
-
-    private var screenPermissionCard: some View {
-        PermissionAccessCard(
-            accent: Color(red: 0.20, green: 0.45, blue: 0.95),
-            iconName: "rectangle.on.rectangle.circle",
-            title: "Screen and system audio",
-            subtitle: "Required for ScreenCaptureKit to hear meeting audio from your Mac and feed it into the live transcript pipeline.",
-            statusTitle: screenStatusTitle,
-            statusTint: screenStatusTint,
-            actionTitle: screenActionTitle,
-            actionIconName: screenActionIcon,
-            isActionEnabled: !permissionsController.isRequestingScreenCaptureAccess && permissionsController.screenCaptureState == .needsApproval,
-            isActionInProgress: permissionsController.isRequestingScreenCaptureAccess,
-            helpText: screenHelpText
-        ) {
-            permissionsController.requestScreenCaptureAccess()
         }
     }
 
@@ -217,17 +189,17 @@ private struct PermissionsOnboardingView: View {
                     .font(.headline)
 
                 BenefitRow(
-                    tint: Color(red: 0.19, green: 0.45, blue: 0.95),
-                    iconName: "speaker.wave.2.fill",
-                    title: "System audio capture",
-                    subtitle: "Speech from meetings, calls, and videos starts flowing into the transcript."
+                    tint: Color(red: 0.10, green: 0.62, blue: 0.45),
+                    iconName: "mic.fill",
+                    title: "Audio-only system capture",
+                    subtitle: "Speechara listens to system audio without asking for screen recording access."
                 )
 
                 BenefitRow(
-                    tint: Color(red: 0.10, green: 0.62, blue: 0.45),
-                    iconName: "mic.badge.plus",
-                    title: "Your microphone mixed in",
-                    subtitle: "Speechara can keep your own voice in the same session when you want a full conversation log."
+                    tint: Color(red: 0.19, green: 0.45, blue: 0.95),
+                    iconName: "menubar.rectangle",
+                    title: "Menu bar control",
+                    subtitle: "Start and stop listening while Speechara stays in the top bar."
                 )
 
                 BenefitRow(
@@ -249,19 +221,7 @@ private struct PermissionsOnboardingView: View {
                 StepRow(
                     isComplete: permissionsController.microphoneState.isGranted,
                     title: "Allow microphone access",
-                    subtitle: "Needed for local voice capture and device testing."
-                )
-
-                StepRow(
-                    isComplete: permissionsController.screenCaptureState.isApproved,
-                    title: "Approve screen and system audio",
-                    subtitle: "Needed for meeting audio from macOS."
-                )
-
-                StepRow(
-                    isComplete: permissionsController.screenCaptureState != .restartRequired,
-                    title: "Reopen Speechara once",
-                    subtitle: "Only needed if screen access was granted during this launch."
+                    subtitle: "Optional for microphone mix-in and device testing."
                 )
             }
         }
@@ -269,8 +229,8 @@ private struct PermissionsOnboardingView: View {
 
     private var footerActions: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if !permissionsController.allRequiredPermissionsGranted && !permissionsController.shouldSuggestRelaunch {
-                Text("You can skip this once, but Speechara will only capture live sessions correctly after both permissions are enabled.")
+            if !permissionsController.microphoneState.isGranted {
+                Text("You can skip this once. Speechara will ask for microphone access later only if you enable microphone mix-in.")
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
             }
@@ -300,10 +260,6 @@ private struct PermissionsOnboardingView: View {
     }
 
     private var readinessTitle: String {
-        if permissionsController.shouldSuggestRelaunch {
-            return SL("Restart required")
-        }
-
         if permissionsController.allRequiredPermissionsGranted {
             return SL("Ready to listen")
         }
@@ -312,34 +268,22 @@ private struct PermissionsOnboardingView: View {
     }
 
     private var readinessSubtitle: String {
-        if permissionsController.shouldSuggestRelaunch {
-            return SL("Speechara has everything it needs, but screen capture only becomes active after a relaunch.")
+        if permissionsController.microphoneState.isGranted {
+            return SL("Microphone access is active in this launch.")
         }
 
-        if permissionsController.allRequiredPermissionsGranted {
-            return SL("Both macOS permissions are active in this launch.")
-        }
-
-        return SL("Finish the two access checks and the main capture flow will be ready.")
+        return SL("System audio starts without screen recording. Microphone access can be enabled later.")
     }
 
     private var readinessDetail: String {
-        if permissionsController.shouldSuggestRelaunch {
-            return SL("Use Quit and reopen below. On the next launch Speechara will enter the main workspace with capture ready.")
-        }
-
-        if permissionsController.allRequiredPermissionsGranted {
+        if permissionsController.microphoneState.isGranted {
             return SL("You can continue straight into the app and start a listening session without additional permission prompts.")
         }
 
-        return SL("Speechara asks only for the permissions that directly power the current product: microphone input and screen plus system audio capture.")
+        return SL("Speechara asks for microphone input only when microphone mix-in or testing needs it.")
     }
 
     private var readinessTint: Color {
-        if permissionsController.shouldSuggestRelaunch {
-            return Color(red: 0.19, green: 0.45, blue: 0.95)
-        }
-
         if permissionsController.allRequiredPermissionsGranted {
             return Color(red: 0.10, green: 0.62, blue: 0.45)
         }
@@ -348,10 +292,6 @@ private struct PermissionsOnboardingView: View {
     }
 
     private var readinessIcon: String {
-        if permissionsController.shouldSuggestRelaunch {
-            return "arrow.clockwise.circle.fill"
-        }
-
         if permissionsController.allRequiredPermissionsGranted {
             return "checkmark.seal.fill"
         }
@@ -414,66 +354,7 @@ private struct PermissionsOnboardingView: View {
         }
     }
 
-    private var screenStatusTitle: String {
-        switch permissionsController.screenCaptureState {
-        case .needsApproval:
-            return SL("Not approved")
-        case .restartRequired:
-            return SL("Restart needed")
-        case .granted:
-            return SL("Granted")
-        }
-    }
-
-    private var screenStatusTint: Color {
-        switch permissionsController.screenCaptureState {
-        case .needsApproval:
-            return Color(red: 0.89, green: 0.57, blue: 0.20)
-        case .restartRequired:
-            return Color(red: 0.19, green: 0.45, blue: 0.95)
-        case .granted:
-            return Color(red: 0.10, green: 0.62, blue: 0.45)
-        }
-    }
-
-    private var screenActionTitle: String {
-        switch permissionsController.screenCaptureState {
-        case .needsApproval:
-            return SL("Allow access")
-        case .restartRequired:
-            return SL("Approved")
-        case .granted:
-            return SL("Allowed")
-        }
-    }
-
-    private var screenActionIcon: String {
-        switch permissionsController.screenCaptureState {
-        case .needsApproval:
-            return "rectangle.badge.plus"
-        case .restartRequired:
-            return "arrow.clockwise"
-        case .granted:
-            return "checkmark"
-        }
-    }
-
-    private var screenHelpText: String {
-        switch permissionsController.screenCaptureState {
-        case .needsApproval:
-            return SL("macOS may show a one-time prompt and ask you to reopen Speechara after approval.")
-        case .restartRequired:
-            return SL("The permission is approved. One relaunch remains before system audio capture becomes active.")
-        case .granted:
-            return SL("Screen and system audio capture are ready in this launch.")
-        }
-    }
-
     private var primaryActionTitle: String {
-        if permissionsController.shouldSuggestRelaunch {
-            return SL("Quit and reopen")
-        }
-
         if permissionsController.allRequiredPermissionsGranted {
             return SL("Open Speechara")
         }
@@ -482,10 +363,6 @@ private struct PermissionsOnboardingView: View {
     }
 
     private var primaryActionIcon: String {
-        if permissionsController.shouldSuggestRelaunch {
-            return "arrow.clockwise"
-        }
-
         if permissionsController.allRequiredPermissionsGranted {
             return "play.fill"
         }
@@ -494,10 +371,6 @@ private struct PermissionsOnboardingView: View {
     }
 
     private var primaryActionTint: Color {
-        if permissionsController.shouldSuggestRelaunch {
-            return Color(red: 0.19, green: 0.45, blue: 0.95)
-        }
-
         if permissionsController.allRequiredPermissionsGranted {
             return Color(red: 0.10, green: 0.62, blue: 0.45)
         }
@@ -506,19 +379,10 @@ private struct PermissionsOnboardingView: View {
     }
 
     private var primaryActionEnabled: Bool {
-        permissionsController.shouldSuggestRelaunch || permissionsController.allRequiredPermissionsGranted
+        permissionsController.allRequiredPermissionsGranted
     }
 
     private func handlePrimaryAction() {
-        if permissionsController.shouldSuggestRelaunch {
-            if permissionsController.microphoneState.isGranted {
-                onContinue()
-            }
-
-            permissionsController.quitAndReopenApplication()
-            return
-        }
-
         guard permissionsController.allRequiredPermissionsGranted else {
             return
         }

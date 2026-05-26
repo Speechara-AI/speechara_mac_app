@@ -65,7 +65,7 @@ title.draw(
   withAttributes: titleAttributes
 )
 
-let subtitle = "Drop the app onto the Applications shortcut to install it."
+let subtitle = "Then open \(productName) from your Applications folder"
 let subtitleAttributes: [NSAttributedString.Key: Any] = [
   .font: NSFont.systemFont(ofSize: 14, weight: .regular),
   .foregroundColor: NSColor(calibratedRed: 0.39, green: 0.42, blue: 0.46, alpha: 1),
@@ -78,32 +78,32 @@ subtitle.draw(
 )
 
 let arrowPath = NSBezierPath()
-arrowPath.move(to: NSPoint(x: 278, y: 244))
-arrowPath.line(to: NSPoint(x: 368, y: 244))
-arrowPath.line(to: NSPoint(x: 368, y: 284))
-arrowPath.line(to: NSPoint(x: 462, y: 210))
-arrowPath.line(to: NSPoint(x: 368, y: 136))
-arrowPath.line(to: NSPoint(x: 368, y: 176))
-arrowPath.line(to: NSPoint(x: 278, y: 176))
+arrowPath.move(to: NSPoint(x: 330, y: 222))
+arrowPath.line(to: NSPoint(x: 356, y: 222))
+arrowPath.line(to: NSPoint(x: 356, y: 238))
+arrowPath.line(to: NSPoint(x: 405, y: 210))
+arrowPath.line(to: NSPoint(x: 356, y: 182))
+arrowPath.line(to: NSPoint(x: 356, y: 198))
+arrowPath.line(to: NSPoint(x: 330, y: 198))
 arrowPath.close()
-arrowPath.lineWidth = 4
-arrowPath.setLineDash([10, 8], count: 2, phase: 0)
+arrowPath.lineWidth = 3
+arrowPath.setLineDash([6, 6], count: 2, phase: 0)
 NSColor(calibratedRed: 0.57, green: 0.6, blue: 0.65, alpha: 0.95).setStroke()
 arrowPath.stroke()
 
-let accentPath = NSBezierPath(roundedRect: NSRect(x: 70, y: 84, width: size.width - 140, height: 32), xRadius: 16, yRadius: 16)
+let accentPath = NSBezierPath(roundedRect: NSRect(x: 70, y: 34, width: size.width - 140, height: 28), xRadius: 14, yRadius: 14)
 NSColor(calibratedRed: 0.9, green: 0.92, blue: 0.95, alpha: 0.9).setFill()
 accentPath.fill()
 
-let footer = "Open the DMG and drag the app into Applications"
+let footer = "After copying, eject this disk image"
 let footerAttributes: [NSAttributedString.Key: Any] = [
-  .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+  .font: NSFont.systemFont(ofSize: 12, weight: .medium),
   .foregroundColor: NSColor(calibratedRed: 0.33, green: 0.36, blue: 0.4, alpha: 1),
   .paragraphStyle: titleStyle
 ]
 
 footer.draw(
-  in: NSRect(x: 90, y: 92, width: size.width - 180, height: 18),
+  in: NSRect(x: 90, y: 41, width: size.width - 180, height: 16),
   withAttributes: footerAttributes
 )
 

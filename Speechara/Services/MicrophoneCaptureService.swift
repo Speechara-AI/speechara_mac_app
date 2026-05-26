@@ -36,7 +36,7 @@ final class MicrophoneCaptureService: @unchecked Sendable {
     private static let gateOpenThreshold = 0.025
     private static let gateHoldChunks = 10
 
-    private let captureQueue = DispatchQueue(label: "LiveSubtitlesMVP.MicrophoneCapture")
+    private let captureQueue = DispatchQueue(label: "Speechara.MicrophoneCapture")
 
     private var audioUnit: AudioUnit?
     private var captureFormat: AVAudioFormat?

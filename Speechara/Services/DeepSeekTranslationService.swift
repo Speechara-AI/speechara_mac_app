@@ -38,6 +38,13 @@ struct DeepSeekTranslationHistoryTurn: Sendable {
 }
 
 actor DeepSeekTranslationService {
+    private static let maxLiveTranslationAttempts = 4
+    private static let reconnectDelayNanoseconds: [UInt64] = [
+        400_000_000,
+        1_200_000_000,
+        2_500_000_000,
+    ]
+
     private let maxHistoryTurns = 4
     private let session: URLSession
     private let proxyService: SpeecharaBackendProxyService
@@ -93,37 +100,8 @@ actor DeepSeekTranslationService {
         isStopping = false
         liveSessionID = UUID().uuidString
 
-        let request: URLRequest
         do {
-            request = try await proxyService.makeWebSocketRequest(path: "/api/ai/translation/live")
-        } catch let error as SpeecharaBackendProxyError {
-            switch error {
-            case .authenticationRequired:
-                throw DeepSeekTranslationError.authenticationRequired
-            case .invalidRequest, .invalidBackendBaseURL:
-                throw DeepSeekTranslationError.invalidRequest
-            case .invalidResponse, .serverError:
-                throw DeepSeekTranslationError.serverError(error.localizedDescription)
-            }
-        }
-
-        let webSocketTask = session.webSocketTask(with: request)
-        self.webSocketTask = webSocketTask
-        webSocketTask.resume()
-
-        startReceiveLoop(for: webSocketTask)
-        startKeepAliveLoop(for: webSocketTask)
-
-        do {
-            try await waitForReadySignal()
-            try await sendSocketMessage(
-                TranslationConfigureMessage(
-                    type: "configure",
-                    sessionId: liveSessionID,
-                    sourceLanguage: self.sourceLanguageCode,
-                    targetLanguage: self.targetLanguageCode
-                )
-            )
+            try await establishTranslationSocket()
         } catch {
             await resetSession()
             throw error
@@ -257,7 +235,7 @@ actor DeepSeekTranslationService {
             }
 
             do {
-                let translation = try await requestLiveTranslation(
+                let translation = try await requestLiveTranslationWithReconnect(
                     for: nextChunk.transcript,
                     turnID: nextChunk.turnID
                 )
@@ -292,12 +270,133 @@ actor DeepSeekTranslationService {
         return pendingTranscriptChunks.removeFirst()
     }
 
+    private func requestLiveTranslationWithReconnect(
+        for transcript: String,
+        turnID: UUID
+    ) async throws -> String {
+        var attempt = 0
+        var lastError: Error?
+
+        while attempt < Self.maxLiveTranslationAttempts {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+
+            do {
+                try await ensureTranslationSocketReady()
+                return try await requestLiveTranslation(for: transcript, turnID: turnID)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
+                attempt += 1
+
+                guard attempt < Self.maxLiveTranslationAttempts,
+                      isRecoverableTranslationError(error) else {
+                    throw error
+                }
+
+                await closeSocketForReconnect()
+
+                let delayIndex = min(attempt - 1, Self.reconnectDelayNanoseconds.count - 1)
+                try await Task.sleep(nanoseconds: Self.reconnectDelayNanoseconds[delayIndex])
+            }
+        }
+
+        throw lastError ?? DeepSeekTranslationError.invalidResponse
+    }
+
+    private func ensureTranslationSocketReady() async throws {
+        guard webSocketTask == nil || !translationSocketReady else {
+            return
+        }
+
+        await closeSocketForReconnect()
+        try await establishTranslationSocket()
+    }
+
+    private func establishTranslationSocket() async throws {
+        guard webSocketTask == nil else {
+            return
+        }
+
+        translationSocketReady = false
+
+        let request = try await makeLiveTranslationWebSocketRequest()
+        let webSocketTask = session.webSocketTask(with: request)
+        self.webSocketTask = webSocketTask
+        webSocketTask.resume()
+
+        startReceiveLoop(for: webSocketTask)
+        startKeepAliveLoop(for: webSocketTask)
+
+        do {
+            try await waitForReadySignal()
+            try await sendSocketMessage(
+                TranslationConfigureMessage(
+                    type: "configure",
+                    sessionId: liveSessionID,
+                    sourceLanguage: self.sourceLanguageCode,
+                    targetLanguage: self.targetLanguageCode
+                )
+            )
+        } catch {
+            await closeSocketForReconnect()
+            throw error
+        }
+    }
+
+    private func makeLiveTranslationWebSocketRequest() async throws -> URLRequest {
+        do {
+            return try await proxyService.makeWebSocketRequest(path: "/api/ai/translation/live")
+        } catch let error as SpeecharaBackendProxyError {
+            switch error {
+            case .authenticationRequired:
+                throw DeepSeekTranslationError.authenticationRequired
+            case .invalidRequest, .invalidBackendBaseURL:
+                throw DeepSeekTranslationError.invalidRequest
+            case .invalidResponse, .serverError:
+                throw DeepSeekTranslationError.serverError(error.localizedDescription)
+            }
+        }
+    }
+
+    private func isRecoverableTranslationError(_ error: Error) -> Bool {
+        guard let translationError = error as? DeepSeekTranslationError else {
+            return true
+        }
+
+        switch translationError {
+        case .requestFailed, .invalidResponse, .serverError:
+            return true
+        case .authenticationRequired, .invalidRequest, .alreadyConnected:
+            return false
+        }
+    }
+
+    private func closeSocketForReconnect() async {
+        isStopping = true
+
+        failReadyIfNeeded(with: DeepSeekTranslationError.requestFailed(CancellationError()))
+        failAllPendingTurns(with: DeepSeekTranslationError.requestFailed(CancellationError()))
+
+        receiveTask?.cancel()
+        keepAliveTask?.cancel()
+        receiveTask = nil
+        keepAliveTask = nil
+
+        self.webSocketTask?.cancel(with: .goingAway, reason: nil)
+        self.webSocketTask = nil
+        translationSocketReady = false
+        isStopping = false
+    }
+
     private func requestLiveTranslation(
         for transcript: String,
         turnID: UUID
     ) async throws -> String {
         guard webSocketTask != nil, translationSocketReady else {
-            throw DeepSeekTranslationError.authenticationRequired
+            throw DeepSeekTranslationError.requestFailed(URLError(.networkConnectionLost))
         }
 
         let turnKey = turnID.uuidString
@@ -377,7 +476,10 @@ actor DeepSeekTranslationService {
                     break
                 }
 
-                await handleSocketFailure(DeepSeekTranslationError.requestFailed(error))
+                await handleSocketFailure(
+                    DeepSeekTranslationError.requestFailed(error),
+                    for: webSocketTask
+                )
                 break
             }
         }
@@ -399,7 +501,10 @@ actor DeepSeekTranslationService {
                 }
             }
         } catch {
-            await handleSocketFailure(DeepSeekTranslationError.requestFailed(error))
+            await handleSocketFailure(
+                DeepSeekTranslationError.requestFailed(error),
+                for: webSocketTask
+            )
         }
     }
 
@@ -482,12 +587,19 @@ actor DeepSeekTranslationService {
         }
     }
 
-    private func handleSocketFailure(_ error: Error) async {
+    private func handleSocketFailure(
+        _ error: Error,
+        for webSocketTask: URLSessionWebSocketTask
+    ) async {
         if isStopping {
             return
         }
 
-        let shouldEmitFailure = pendingTurnContinuations.isEmpty && pendingTranscriptChunks.isEmpty
+        guard let currentWebSocketTask = self.webSocketTask,
+              currentWebSocketTask === webSocketTask else {
+            return
+        }
+
         failReadyIfNeeded(with: error)
         failAllPendingTurns(with: error)
 
@@ -495,13 +607,9 @@ actor DeepSeekTranslationService {
         keepAliveTask?.cancel()
         receiveTask = nil
         keepAliveTask = nil
-        webSocketTask?.cancel(with: .goingAway, reason: nil)
-        webSocketTask = nil
+        self.webSocketTask?.cancel(with: .goingAway, reason: nil)
+        self.webSocketTask = nil
         translationSocketReady = false
-
-        if shouldEmitFailure {
-            eventHandler?(.failed(error.localizedDescription))
-        }
     }
 
     private func failReadyIfNeeded(with error: Error) {

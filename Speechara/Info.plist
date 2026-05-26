@@ -20,13 +20,15 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>LSUIElement</key>
+	<false/>
 	<key>NSAudioCaptureUsageDescription</key>
-	<string>Speechara records system audio into a local M4A file for transcription testing.</string>
+	<string>Speechara captures system audio for live transcription and optional local recording.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Speechara needs microphone access so your own voice can be added to live transcription and local audio capture.</string>
-	<key>NSScreenCaptureUsageDescription</key>
-	<string>Speechara needs screen and system audio recording access to capture system audio on macOS.</string>
+	<string>Speechara needs microphone access for live transcription and optional local audio recording.</string>
 </dict>
 </plist>

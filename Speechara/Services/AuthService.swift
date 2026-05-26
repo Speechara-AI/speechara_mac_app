@@ -23,6 +23,60 @@ struct AuthenticatedUser: Codable, Equatable {
     let currentWorkspace: WorkspaceReference?
     let workspaces: [WorkspaceReference]?
 
+    init(
+        id: String,
+        email: String,
+        displayName: String,
+        avatarURL: String?,
+        workspaceID: String?,
+        defaultWorkspaceID: String?,
+        currentWorkspaceID: String?,
+        newbie: Bool?,
+        workspace: WorkspaceReference?,
+        defaultWorkspace: WorkspaceReference?,
+        currentWorkspace: WorkspaceReference?,
+        workspaces: [WorkspaceReference]?
+    ) {
+        self.id = id
+        self.email = email
+        self.displayName = displayName
+        self.avatarURL = avatarURL
+        self.workspaceID = workspaceID
+        self.defaultWorkspaceID = defaultWorkspaceID
+        self.currentWorkspaceID = currentWorkspaceID
+        self.newbie = newbie
+        self.workspace = workspace
+        self.defaultWorkspace = defaultWorkspace
+        self.currentWorkspace = currentWorkspace
+        self.workspaces = workspaces
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: FlexibleCodingKey.self)
+        let id = try container.decodeRequiredTrimmedString(forKeys: "id")
+        let email = try container.decodeRequiredTrimmedString(forKeys: "email")
+        let displayName = try container.decodeTrimmedStringIfPresent(
+            forKeys: "display_name",
+            "displayName",
+            "name"
+        ) ?? email
+
+        self.init(
+            id: id,
+            email: email,
+            displayName: displayName,
+            avatarURL: try container.decodeTrimmedStringIfPresent(forKeys: "avatar_url", "avatarUrl"),
+            workspaceID: try container.decodeTrimmedStringIfPresent(forKeys: "workspaceId", "workspace_id"),
+            defaultWorkspaceID: try container.decodeTrimmedStringIfPresent(forKeys: "defaultWorkspaceId", "default_workspace_id"),
+            currentWorkspaceID: try container.decodeTrimmedStringIfPresent(forKeys: "currentWorkspaceId", "current_workspace_id"),
+            newbie: try container.decodeIfPresent(Bool.self, forKeys: "newbie"),
+            workspace: try container.decodeIfPresent(WorkspaceReference.self, forKeys: "workspace"),
+            defaultWorkspace: try container.decodeIfPresent(WorkspaceReference.self, forKeys: "defaultWorkspace", "default_workspace"),
+            currentWorkspace: try container.decodeIfPresent(WorkspaceReference.self, forKeys: "currentWorkspace", "current_workspace"),
+            workspaces: try container.decodeIfPresent([WorkspaceReference].self, forKeys: "workspaces")
+        )
+    }
+
     enum CodingKeys: String, CodingKey {
         case id
         case email
@@ -96,6 +150,113 @@ struct AuthSession: Codable, Equatable {
     }
 }
 
+struct EmailChallenge: Codable, Equatable {
+    let challengeId: String
+    let email: String
+    let maskedEmail: String
+    let purpose: String
+    let linkedAuthProviders: [String]
+    let expiresIn: Int
+    let expiresAt: Date
+    let resendAfter: Int?
+}
+
+struct EmailVerification: Codable, Equatable {
+    let challengeId: String
+    let email: String
+    let maskedEmail: String
+    let verified: Bool
+    let purpose: String
+    let linkedAuthProviders: [String]
+    let verificationToken: String
+    let expiresIn: Int
+    let expiresAt: Date
+}
+
+struct TotpSetup: Codable, Equatable {
+    let setupId: String
+    let otpauthUri: String
+    let secret: String
+    let qrCodeDataUrl: String?
+    let expiresIn: Int
+    let expiresAt: Date
+}
+
+struct MfaChallenge: Codable, Equatable {
+    let challengeId: String
+    let email: String
+    let maskedEmail: String
+    let type: String
+    let expiresIn: Int
+    let expiresAt: Date
+}
+
+enum EmailLoginResult: Equatable {
+    case authenticated(AuthSession)
+    case mfaRequired(MfaChallenge)
+}
+
+struct EmailRegistrationMFA: Encodable, Equatable {
+    let type: String
+    let setupId: String
+    let code: String
+
+    init(setupId: String, code: String) {
+        self.type = "totp"
+        self.setupId = setupId
+        self.code = code
+    }
+}
+
+struct CompleteEmailRegistrationInput: Encodable, Equatable {
+    let challengeId: String
+    let email: String
+    let name: String
+    let password: String
+    let verificationToken: String
+    let mfa: EmailRegistrationMFA?
+
+    enum CodingKeys: String, CodingKey {
+        case challengeId
+        case email
+        case name
+        case password
+        case verificationToken
+        case mfa
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(challengeId, forKey: .challengeId)
+        try container.encode(email, forKey: .email)
+        try container.encode(name, forKey: .name)
+        try container.encode(password, forKey: .password)
+        try container.encode(verificationToken, forKey: .verificationToken)
+
+        if let mfa {
+            try container.encode(mfa, forKey: .mfa)
+        } else {
+            try container.encodeNil(forKey: .mfa)
+        }
+    }
+}
+
+struct SecurityStatus: Decodable, Equatable {
+    struct MFA: Decodable, Equatable {
+        let totpEnabled: Bool
+        let enabledMethods: [String]
+        let enabledAt: Date?
+    }
+
+    let passwordLoginEnabled: Bool
+    let mfa: MFA
+}
+
+struct PasswordChangeResult: Decodable, Equatable {
+    let passwordLoginEnabled: Bool
+    let changedAt: Date?
+}
+
 private struct CurrentUserProfileResponse: Decodable, Equatable {
     let id: String?
     let email: String?
@@ -123,10 +284,80 @@ private extension Optional where Wrapped == String {
     }
 }
 
+private extension String {
+    var nonEmptyTrimmed: String? {
+        let value = trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+}
+
+private struct FlexibleCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init(_ stringValue: String) {
+        self.stringValue = stringValue
+        self.intValue = nil
+    }
+
+    init?(stringValue: String) {
+        self.init(stringValue)
+    }
+
+    init?(intValue: Int) {
+        self.stringValue = "\(intValue)"
+        self.intValue = intValue
+    }
+}
+
+private extension KeyedDecodingContainer where Key == FlexibleCodingKey {
+    func decodeRequiredTrimmedString(forKeys keys: String...) throws -> String {
+        if let value = try decodeTrimmedStringIfPresent(forKeys: keys) {
+            return value
+        }
+
+        throw DecodingError.keyNotFound(
+            FlexibleCodingKey(keys.first ?? ""),
+            DecodingError.Context(
+                codingPath: codingPath,
+                debugDescription: "Expected one of keys: \(keys.joined(separator: ", "))."
+            )
+        )
+    }
+
+    func decodeTrimmedStringIfPresent(forKeys keys: String...) throws -> String? {
+        try decodeTrimmedStringIfPresent(forKeys: keys)
+    }
+
+    func decodeTrimmedStringIfPresent(forKeys keys: [String]) throws -> String? {
+        for key in keys {
+            let codingKey = FlexibleCodingKey(key)
+            if let value = try decodeIfPresent(String.self, forKey: codingKey)?.nonEmptyTrimmed {
+                return value
+            }
+        }
+
+        return nil
+    }
+
+    func decodeIfPresent<T: Decodable>(_ type: T.Type, forKeys keys: String...) throws -> T? {
+        for key in keys {
+            let codingKey = FlexibleCodingKey(key)
+            if contains(codingKey), let value = try decodeIfPresent(type, forKey: codingKey) {
+                return value
+            }
+        }
+
+        return nil
+    }
+}
+
 enum AuthServiceError: LocalizedError {
     case missingBackendBaseURL
+    case missingMicrosoftClientID
     case invalidBackendBaseURL(String)
     case browserOpenFailed
+    case microsoftIDTokenMissing
     case invalidCallback
     case callbackStateMismatch
     case callbackMissingCode
@@ -134,16 +365,21 @@ enum AuthServiceError: LocalizedError {
     case requestFailed(String)
     case invalidResponse
     case timedOutWaitingForGoogle
+    case timedOutWaitingForMicrosoft
     case userCancelled
 
     var errorDescription: String? {
         switch self {
         case .missingBackendBaseURL:
-            return "Google sign-in is not configured yet. Add the auth backend URL in Settings first."
+            return "Sign-in is not configured yet. Add the auth backend URL in Settings first."
+        case .missingMicrosoftClientID:
+            return "Microsoft sign-in is not configured yet. Add the Microsoft client ID in Settings first."
         case .invalidBackendBaseURL(let value):
             return "The saved auth backend URL is invalid: \(value)"
         case .browserOpenFailed:
-            return "Speechara could not open the system browser for Google sign-in."
+            return "Speechara could not open the system browser for sign-in."
+        case .microsoftIDTokenMissing:
+            return "Microsoft sign-in completed, but Microsoft did not return an ID token."
         case .invalidCallback:
             return "Speechara received an invalid OAuth callback."
         case .callbackStateMismatch:
@@ -158,8 +394,10 @@ enum AuthServiceError: LocalizedError {
             return "The auth backend returned a response Speechara could not understand."
         case .timedOutWaitingForGoogle:
             return "Google sign-in timed out before Speechara received the browser callback."
+        case .timedOutWaitingForMicrosoft:
+            return "Microsoft sign-in timed out before Speechara received the browser callback."
         case .userCancelled:
-            return "Google sign-in was canceled."
+            return "Sign-in was canceled."
         }
     }
 }
@@ -218,6 +456,95 @@ final class AuthService {
         }
     }
 
+    private struct MicrosoftAPIExchangeRequest: Encodable {
+        let idToken: String
+    }
+
+    private struct MicrosoftTokenResponse: Decodable {
+        let idToken: String?
+
+        enum CodingKeys: String, CodingKey {
+            case idToken = "id_token"
+        }
+    }
+
+    private struct EmailRegistrationStartRequest: Encodable {
+        let email: String
+        let name: String?
+    }
+
+    private struct EmailCodeVerificationRequest: Encodable {
+        let challengeId: String
+        let email: String
+        let code: String
+
+        enum CodingKeys: String, CodingKey {
+            case challengeId
+            case email
+            case code
+        }
+    }
+
+    private struct EmailResendCodeRequest: Encodable {
+        let challengeId: String
+        let email: String
+    }
+
+    private struct RegistrationTotpSetupRequest: Encodable {
+        let challengeId: String
+        let email: String
+        let verificationToken: String
+    }
+
+    private struct EmailLoginRequest: Encodable {
+        let email: String
+        let password: String
+    }
+
+    private struct EmailMfaVerificationRequest: Encodable {
+        let challengeId: String
+        let email: String
+        let type: String
+        let code: String
+    }
+
+    private struct EmailLoginMfaChallengeResponse: Decodable {
+        let code: String
+        let challengeId: String
+        let email: String
+        let maskedEmail: String
+        let type: String
+        let expiresIn: Int
+        let expiresAt: Date
+
+        var challenge: MfaChallenge {
+            MfaChallenge(
+                challengeId: challengeId,
+                email: email,
+                maskedEmail: maskedEmail,
+                type: type,
+                expiresIn: expiresIn,
+                expiresAt: expiresAt
+            )
+        }
+    }
+
+    private struct ChangePasswordRequest: Encodable {
+        let currentPassword: String
+        let newPassword: String
+    }
+
+    private struct EnableTotpRequest: Encodable {
+        let setupId: String
+        let code: String
+    }
+
+    private struct DisableTotpRequest: Encodable {
+        let code: String
+    }
+
+    private struct EmptyRequest: Encodable {}
+
     private struct RefreshRequest: Encodable {
         let refreshToken: String
 
@@ -240,23 +567,42 @@ final class AuthService {
 
     private struct SessionResponse: Decodable {
         let accessToken: String
-        let refreshToken: String
+        let refreshToken: String?
         let tokenType: String
         let expiresAt: Date
         let user: AuthenticatedUser
 
-        enum CodingKeys: String, CodingKey {
-            case accessToken = "access_token"
-            case refreshToken = "refresh_token"
-            case tokenType = "token_type"
-            case expiresAt = "expires_at"
-            case user
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: FlexibleCodingKey.self)
+            accessToken = try container.decodeRequiredTrimmedString(forKeys: "access_token", "accessToken")
+            refreshToken = try container.decodeTrimmedStringIfPresent(forKeys: "refresh_token", "refreshToken")
+            tokenType = try container.decodeTrimmedStringIfPresent(forKeys: "token_type", "tokenType") ?? "Bearer"
+
+            if let decodedExpiresAt = try container.decodeIfPresent(Date.self, forKeys: "expires_at", "expiresAt") {
+                expiresAt = decodedExpiresAt
+            } else if let expiresIn = try container.decodeIfPresent(Int.self, forKeys: "expires_in", "expiresIn") {
+                expiresAt = Date(timeIntervalSinceNow: TimeInterval(expiresIn))
+            } else {
+                throw DecodingError.keyNotFound(
+                    FlexibleCodingKey("expires_at"),
+                    DecodingError.Context(
+                        codingPath: decoder.codingPath,
+                        debugDescription: "Expected expires_at, expiresAt, expires_in, or expiresIn."
+                    )
+                )
+            }
+
+            user = try container.decode(AuthenticatedUser.self, forKey: FlexibleCodingKey("user"))
         }
 
-        var session: AuthSession {
-            AuthSession(
+        func session(fallbackRefreshToken: String?) throws -> AuthSession {
+            guard let resolvedRefreshToken = refreshToken?.nonEmptyTrimmed ?? fallbackRefreshToken?.nonEmptyTrimmed else {
+                throw AuthServiceError.invalidResponse
+            }
+
+            return AuthSession(
                 accessToken: accessToken,
-                refreshToken: refreshToken,
+                refreshToken: resolvedRefreshToken,
                 tokenType: tokenType,
                 expiresAt: expiresAt,
                 user: user
@@ -269,8 +615,21 @@ final class AuthService {
         let message: String?
         let detail: String?
         let title: String?
+        let errorDescription: String?
+
+        enum CodingKeys: String, CodingKey {
+            case error
+            case message
+            case detail
+            case title
+            case errorDescription = "error_description"
+        }
 
         var resolvedMessage: String? {
+            if let errorDescription, !errorDescription.isEmpty {
+                return errorDescription
+            }
+
             if let message, !message.isEmpty {
                 return message
             }
@@ -320,7 +679,7 @@ final class AuthService {
         }
     }
 
-    private struct GoogleAuthTransaction {
+    private struct OAuthPKCETransaction {
         let state: String
         let codeVerifier: String
 
@@ -390,7 +749,7 @@ final class AuthService {
 
     func signInWithGoogle() async throws -> AuthSession {
         let configuration = try makeConfiguration()
-        let transaction = GoogleAuthTransaction()
+        let transaction = OAuthPKCETransaction()
         let redirectServer = try LoopbackOAuthRedirectServer(callbackPath: "/oauth/google/callback")
 
         activeRedirectServer = redirectServer
@@ -415,7 +774,10 @@ final class AuthService {
             throw AuthServiceError.browserOpenFailed
         }
 
-        let callbackURL = try await redirectServer.waitForCallback(timeout: 300)
+        let callbackURL = try await redirectServer.waitForCallback(
+            timeout: 300,
+            timeoutError: AuthServiceError.timedOutWaitingForGoogle
+        )
 
         await MainActor.run {
             NSApp.activate(ignoringOtherApps: true)
@@ -440,6 +802,232 @@ final class AuthService {
         return authenticatedSession
     }
 
+    func signInWithMicrosoft() async throws -> AuthSession {
+        _ = try makeConfiguration()
+        let clientID = try makeMicrosoftClientID()
+        let transaction = OAuthPKCETransaction()
+        let redirectServer = try LoopbackOAuthRedirectServer(callbackPath: "/oauth/microsoft/callback")
+
+        activeRedirectServer = redirectServer
+        defer {
+            redirectServer.cancel()
+            activeRedirectServer = nil
+        }
+
+        try await redirectServer.start()
+
+        let authorizationURL = try makeMicrosoftAuthorizationURL(
+            clientID: clientID,
+            transaction: transaction,
+            redirectURI: redirectServer.redirectURL
+        )
+
+        let didOpenBrowser = await MainActor.run {
+            NSWorkspace.shared.open(authorizationURL)
+        }
+
+        guard didOpenBrowser else {
+            throw AuthServiceError.browserOpenFailed
+        }
+
+        let callbackURL = try await redirectServer.waitForCallback(
+            timeout: 300,
+            timeoutError: AuthServiceError.timedOutWaitingForMicrosoft
+        )
+
+        await MainActor.run {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+
+        let payload = try CallbackPayload(url: callbackURL)
+
+        guard payload.state == transaction.state else {
+            throw AuthServiceError.callbackStateMismatch
+        }
+
+        let idToken = try await exchangeMicrosoftAuthorizationCode(
+            clientID: clientID,
+            code: payload.code,
+            codeVerifier: transaction.codeVerifier,
+            redirectURI: redirectServer.redirectURL
+        )
+
+        let authenticatedSession = try await exchangeMicrosoftIdToken(idToken)
+        try persistSession(authenticatedSession)
+
+        return authenticatedSession
+    }
+
+    func exchangeMicrosoftIdToken(_ idToken: String) async throws -> AuthSession {
+        let configuration = try makeConfiguration()
+        let requestBody = MicrosoftAPIExchangeRequest(idToken: idToken)
+        let authenticatedSession = try await performAuthSessionRequest(
+            url: configuration.baseURL.appendingPathComponent("api/auth/microsoft"),
+            method: "POST",
+            body: requestBody,
+            bearerToken: nil
+        )
+
+        try persistSession(authenticatedSession)
+        return authenticatedSession
+    }
+
+    func startEmailRegistration(email: String, name: String?) async throws -> EmailChallenge {
+        let configuration = try makeConfiguration()
+        return try await performJSONRequest(
+            url: configuration.baseURL.appendingPathComponent("api/auth/email/register"),
+            method: "POST",
+            body: EmailRegistrationStartRequest(email: email, name: name?.nonEmptyTrimmed),
+            bearerToken: nil
+        )
+    }
+
+    func verifyEmailCode(challengeId: String, email: String, code: String) async throws -> EmailVerification {
+        let configuration = try makeConfiguration()
+        return try await performJSONRequest(
+            url: configuration.baseURL.appendingPathComponent("api/auth/email/verify"),
+            method: "POST",
+            body: EmailCodeVerificationRequest(challengeId: challengeId, email: email, code: code),
+            bearerToken: nil
+        )
+    }
+
+    func setupRegistrationTotp(
+        challengeId: String,
+        email: String,
+        verificationToken: String
+    ) async throws -> TotpSetup {
+        let configuration = try makeConfiguration()
+        return try await performJSONRequest(
+            url: configuration.baseURL.appendingPathComponent("api/auth/email/totp/setup"),
+            method: "POST",
+            body: RegistrationTotpSetupRequest(
+                challengeId: challengeId,
+                email: email,
+                verificationToken: verificationToken
+            ),
+            bearerToken: nil
+        )
+    }
+
+    func completeEmailRegistration(input: CompleteEmailRegistrationInput) async throws -> AuthSession {
+        let configuration = try makeConfiguration()
+        let authenticatedSession = try await performAuthSessionRequest(
+            url: configuration.baseURL.appendingPathComponent("api/auth/email/complete-registration"),
+            method: "POST",
+            body: input,
+            bearerToken: nil
+        )
+
+        try persistSession(authenticatedSession)
+        return authenticatedSession
+    }
+
+    func loginWithEmail(email: String, password: String) async throws -> EmailLoginResult {
+        let configuration = try makeConfiguration()
+        let (data, response) = try await performRawJSONRequest(
+            url: configuration.baseURL.appendingPathComponent("api/auth/email/login"),
+            method: "POST",
+            bodyData: try encoder.encode(EmailLoginRequest(email: email, password: password)),
+            bearerToken: nil
+        )
+
+        if let mfaChallenge = try? decoder.decode(EmailLoginMfaChallengeResponse.self, from: data),
+           mfaChallenge.code == "MFA_REQUIRED" {
+            return .mfaRequired(mfaChallenge.challenge)
+        }
+
+        let sessionResponse = try decodeSessionResponse(from: data)
+        let authenticatedSession = try sessionResponse.session(
+            fallbackRefreshToken: Self.refreshToken(from: response)
+        )
+        try persistSession(authenticatedSession)
+        return .authenticated(authenticatedSession)
+    }
+
+    func verifyEmailMfa(challengeId: String, email: String, code: String) async throws -> AuthSession {
+        let configuration = try makeConfiguration()
+        let authenticatedSession = try await performAuthSessionRequest(
+            url: configuration.baseURL.appendingPathComponent("api/auth/email/mfa/verify"),
+            method: "POST",
+            body: EmailMfaVerificationRequest(
+                challengeId: challengeId,
+                email: email,
+                type: "totp",
+                code: code
+            ),
+            bearerToken: nil
+        )
+
+        try persistSession(authenticatedSession)
+        return authenticatedSession
+    }
+
+    func resendEmailCode(challengeId: String, email: String) async throws -> EmailChallenge {
+        let configuration = try makeConfiguration()
+        return try await performJSONRequest(
+            url: configuration.baseURL.appendingPathComponent("api/auth/email/resend-code"),
+            method: "POST",
+            body: EmailResendCodeRequest(challengeId: challengeId, email: email),
+            bearerToken: nil
+        )
+    }
+
+    func currentUser() async throws -> AuthenticatedUser {
+        let session = try await refreshCurrentUserProfile()
+        return session.user
+    }
+
+    func securityStatus() async throws -> SecurityStatus {
+        let currentSession = try await activeSession()
+        return try await performJSONRequest(
+            url: try makeConfiguration().baseURL.appendingPathComponent("api/auth/security"),
+            method: "GET",
+            bearerToken: currentSession.accessToken
+        )
+    }
+
+    func changePassword(currentPassword: String, newPassword: String) async throws -> PasswordChangeResult {
+        let currentSession = try await activeSession()
+        return try await performJSONRequest(
+            url: try makeConfiguration().baseURL.appendingPathComponent("api/auth/security/password/change"),
+            method: "POST",
+            body: ChangePasswordRequest(currentPassword: currentPassword, newPassword: newPassword),
+            bearerToken: currentSession.accessToken,
+            refreshCookieToken: currentSession.refreshToken
+        )
+    }
+
+    func startTotpSetup() async throws -> TotpSetup {
+        let currentSession = try await activeSession()
+        return try await performJSONRequest(
+            url: try makeConfiguration().baseURL.appendingPathComponent("api/auth/security/mfa/totp/setup"),
+            method: "POST",
+            body: EmptyRequest(),
+            bearerToken: currentSession.accessToken
+        )
+    }
+
+    func enableTotp(setupId: String, code: String) async throws -> SecurityStatus {
+        let currentSession = try await activeSession()
+        return try await performJSONRequest(
+            url: try makeConfiguration().baseURL.appendingPathComponent("api/auth/security/mfa/totp/enable"),
+            method: "POST",
+            body: EnableTotpRequest(setupId: setupId, code: code),
+            bearerToken: currentSession.accessToken
+        )
+    }
+
+    func disableTotp(code: String) async throws -> SecurityStatus {
+        let currentSession = try await activeSession()
+        return try await performJSONRequest(
+            url: try makeConfiguration().baseURL.appendingPathComponent("api/auth/security/mfa/totp/disable"),
+            method: "POST",
+            body: DisableTotpRequest(code: code),
+            bearerToken: currentSession.accessToken
+        )
+    }
+
     func refreshSession(using refreshToken: String) async throws -> AuthSession {
         let configuration = try makeConfiguration()
         let requestBody = RefreshRequest(refreshToken: refreshToken)
@@ -450,7 +1038,7 @@ final class AuthService {
             bearerToken: nil
         )
 
-        let refreshedSession = response.session
+        let refreshedSession = try response.session(fallbackRefreshToken: nil)
         try persistSession(refreshedSession)
         return refreshedSession
     }
@@ -511,7 +1099,7 @@ final class AuthService {
 
     private func requestAuthorizationURL(
         configuration: Configuration,
-        transaction: GoogleAuthTransaction,
+        transaction: OAuthPKCETransaction,
         redirectURI: URL
     ) async throws -> URL {
         let requestBody = AuthorizationStartRequest(
@@ -536,6 +1124,67 @@ final class AuthService {
         return url
     }
 
+    private func makeMicrosoftClientID() throws -> String {
+        guard let clientID = AppConfigurationStore.shared.resolvedValue(for: .microsoftClientID)?.nonEmptyTrimmed else {
+            throw AuthServiceError.missingMicrosoftClientID
+        }
+
+        return clientID
+    }
+
+    private func makeMicrosoftAuthorizationURL(
+        clientID: String,
+        transaction: OAuthPKCETransaction,
+        redirectURI: URL
+    ) throws -> URL {
+        var components = URLComponents(
+            string: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+        )
+        components?.queryItems = [
+            URLQueryItem(name: "client_id", value: clientID),
+            URLQueryItem(name: "response_type", value: "code"),
+            URLQueryItem(name: "redirect_uri", value: redirectURI.absoluteString),
+            URLQueryItem(name: "response_mode", value: "query"),
+            URLQueryItem(name: "scope", value: "openid profile email"),
+            URLQueryItem(name: "state", value: transaction.state),
+            URLQueryItem(name: "code_challenge", value: transaction.codeChallenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
+            URLQueryItem(name: "prompt", value: "select_account"),
+        ]
+
+        guard let url = components?.url else {
+            throw AuthServiceError.invalidResponse
+        }
+
+        return url
+    }
+
+    private func exchangeMicrosoftAuthorizationCode(
+        clientID: String,
+        code: String,
+        codeVerifier: String,
+        redirectURI: URL
+    ) async throws -> String {
+        let response: MicrosoftTokenResponse = try await performFormRequest(
+            url: URL(string: "https://login.microsoftonline.com/common/oauth2/v2.0/token")!,
+            method: "POST",
+            formBody: [
+                "client_id": clientID,
+                "scope": "openid profile email",
+                "code": code,
+                "redirect_uri": redirectURI.absoluteString,
+                "grant_type": "authorization_code",
+                "code_verifier": codeVerifier,
+            ]
+        )
+
+        guard let idToken = response.idToken?.nonEmptyTrimmed else {
+            throw AuthServiceError.microsoftIDTokenMissing
+        }
+
+        return idToken
+    }
+
     private func exchangeCode(
         configuration: Configuration,
         code: String,
@@ -558,7 +1207,7 @@ final class AuthService {
             bearerToken: nil
         )
 
-        return response.session
+        return try response.session(fallbackRefreshToken: nil)
     }
 
     private func makeConfiguration() throws -> Configuration {
@@ -600,27 +1249,31 @@ final class AuthService {
         url: URL,
         method: String,
         body: Body?,
-        bearerToken: String?
+        bearerToken: String?,
+        refreshCookieToken: String? = nil
     ) async throws -> Response {
         let bodyData = try body.map { try encoder.encode($0) }
         return try await performJSONRequest(
             url: url,
             method: method,
             bodyData: bodyData,
-            bearerToken: bearerToken
+            bearerToken: bearerToken,
+            refreshCookieToken: refreshCookieToken
         )
     }
 
     private func performJSONRequest<Response: Decodable>(
         url: URL,
         method: String,
-        bearerToken: String?
+        bearerToken: String?,
+        refreshCookieToken: String? = nil
     ) async throws -> Response {
         try await performJSONRequest(
             url: url,
             method: method,
             bodyData: nil,
-            bearerToken: bearerToken
+            bearerToken: bearerToken,
+            refreshCookieToken: refreshCookieToken
         )
     }
 
@@ -628,8 +1281,58 @@ final class AuthService {
         url: URL,
         method: String,
         bodyData: Data?,
-        bearerToken: String?
+        bearerToken: String?,
+        refreshCookieToken: String? = nil
     ) async throws -> Response {
+        let (data, _) = try await performRawJSONRequest(
+            url: url,
+            method: method,
+            bodyData: bodyData,
+            bearerToken: bearerToken,
+            refreshCookieToken: refreshCookieToken
+        )
+
+        if Response.self == EmptyResponse.self {
+            return EmptyResponse() as! Response
+        }
+
+        guard !data.isEmpty else {
+            throw AuthServiceError.invalidResponse
+        }
+
+        do {
+            return try decoder.decode(Response.self, from: data)
+        } catch {
+            throw AuthServiceError.invalidResponse
+        }
+    }
+
+    private func performAuthSessionRequest<Body: Encodable>(
+        url: URL,
+        method: String,
+        body: Body,
+        bearerToken: String?
+    ) async throws -> AuthSession {
+        let (data, response) = try await performRawJSONRequest(
+            url: url,
+            method: method,
+            bodyData: try encoder.encode(body),
+            bearerToken: bearerToken
+        )
+
+        let sessionResponse = try decodeSessionResponse(from: data)
+        return try sessionResponse.session(
+            fallbackRefreshToken: Self.refreshToken(from: response)
+        )
+    }
+
+    private func performRawJSONRequest(
+        url: URL,
+        method: String,
+        bodyData: Data?,
+        bearerToken: String?,
+        refreshCookieToken: String? = nil
+    ) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -637,6 +1340,10 @@ final class AuthService {
 
         if let bearerToken, !bearerToken.isEmpty {
             request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
+        }
+
+        if let refreshCookieToken = refreshCookieToken?.nonEmptyTrimmed {
+            request.setValue("speechara_refresh_token=\(refreshCookieToken)", forHTTPHeaderField: "Cookie")
         }
 
         if let bodyData {
@@ -662,8 +1369,37 @@ final class AuthService {
             throw AuthServiceError.requestFailed("Auth backend request failed with status \(httpResponse.statusCode).")
         }
 
-        if Response.self == EmptyResponse.self {
-            return EmptyResponse() as! Response
+        return (data, httpResponse)
+    }
+
+    private func performFormRequest<Response: Decodable>(
+        url: URL,
+        method: String,
+        formBody: [String: String]
+    ) async throws -> Response {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.httpBody = formBody.formURLEncodedData
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw AuthServiceError.invalidResponse
+        }
+
+        guard (200...299).contains(httpResponse.statusCode) else {
+            if let apiError = try? decoder.decode(APIErrorResponse.self, from: data),
+               let message = apiError.resolvedMessage {
+                throw AuthServiceError.requestFailed(message)
+            }
+
+            if let bodyText = String(data: data, encoding: .utf8),
+               !bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw AuthServiceError.requestFailed(bodyText)
+            }
+
+            throw AuthServiceError.requestFailed("Microsoft token request failed with status \(httpResponse.statusCode).")
         }
 
         guard !data.isEmpty else {
@@ -672,6 +1408,18 @@ final class AuthService {
 
         do {
             return try decoder.decode(Response.self, from: data)
+        } catch {
+            throw AuthServiceError.invalidResponse
+        }
+    }
+
+    private func decodeSessionResponse(from data: Data) throws -> SessionResponse {
+        guard !data.isEmpty else {
+            throw AuthServiceError.invalidResponse
+        }
+
+        do {
+            return try decoder.decode(SessionResponse.self, from: data)
         } catch {
             throw AuthServiceError.invalidResponse
         }
@@ -688,6 +1436,44 @@ final class AuthService {
             appVersion: version,
             buildNumber: build
         )
+    }
+
+    private static func refreshToken(from response: HTTPURLResponse) -> String? {
+        if let url = response.url,
+           let cookieToken = HTTPCookieStorage.shared
+            .cookies(for: url)?
+            .first(where: { $0.name == "speechara_refresh_token" })?
+            .value
+            .nonEmptyTrimmed {
+            return cookieToken
+        }
+
+        for (key, value) in response.allHeaderFields {
+            guard String(describing: key).lowercased() == "set-cookie" else {
+                continue
+            }
+
+            let headerValue = String(describing: value)
+            let cookieParts = headerValue.components(separatedBy: ",")
+            for cookiePart in cookieParts {
+                let trimmedPart = cookiePart.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard trimmedPart.hasPrefix("speechara_refresh_token=") else {
+                    continue
+                }
+
+                let tokenPart = trimmedPart
+                    .dropFirst("speechara_refresh_token=".count)
+                    .split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
+                    .first
+                    .map(String.init)
+
+                if let token = tokenPart?.removingPercentEncoding?.nonEmptyTrimmed ?? tokenPart?.nonEmptyTrimmed {
+                    return token
+                }
+            }
+        }
+
+        return nil
     }
 
     private static func decodeBackendDate(from decoder: Decoder) throws -> Date {
@@ -712,12 +1498,30 @@ final class AuthService {
     }
 }
 
+enum AuthenticationProvider: Equatable {
+    case google
+    case microsoft
+    case email
+
+    var displayName: String {
+        switch self {
+        case .google:
+            return "Google"
+        case .microsoft:
+            return "Microsoft"
+        case .email:
+            return "email"
+        }
+    }
+}
+
 @MainActor
 final class AuthSessionStore: ObservableObject {
     @Published private(set) var session: AuthSession?
     @Published private(set) var isRestoringSession = true
     @Published private(set) var isAuthenticating = false
     @Published private(set) var isSigningOut = false
+    @Published private(set) var activeAuthenticationProvider: AuthenticationProvider?
     @Published private(set) var errorMessage: String?
 
     private let authService: AuthService
@@ -751,6 +1555,26 @@ final class AuthSessionStore: ObservableObject {
         session = try await authService.refreshCurrentUserProfile()
     }
 
+    @discardableResult
+    func ensureActiveSession() async throws -> AuthSession {
+        do {
+            let activeSession = try await authService.activeSession()
+            session = activeSession
+            errorMessage = nil
+            return activeSession
+        } catch {
+            if session?.needsRefresh != false {
+                authService.clearSavedSession()
+                session = nil
+                errorMessage = SL("Your login expired. Sign in again to continue.")
+            } else {
+                errorMessage = error.localizedDescription
+            }
+
+            throw error
+        }
+    }
+
     func updateCurrentUser(newbie: Bool) async throws {
         session = try await authService.updateCurrentUser(newbie: newbie)
     }
@@ -762,10 +1586,12 @@ final class AuthSessionStore: ObservableObject {
 
         errorMessage = nil
         isAuthenticating = true
+        activeAuthenticationProvider = .google
 
         authenticationTask = Task {
             defer {
                 isAuthenticating = false
+                activeAuthenticationProvider = nil
                 authenticationTask = nil
             }
 
@@ -780,7 +1606,38 @@ final class AuthSessionStore: ObservableObject {
         }
     }
 
+    func signInWithMicrosoft() {
+        guard !isAuthenticating else {
+            return
+        }
+
+        errorMessage = nil
+        isAuthenticating = true
+        activeAuthenticationProvider = .microsoft
+
+        authenticationTask = Task {
+            defer {
+                isAuthenticating = false
+                activeAuthenticationProvider = nil
+                authenticationTask = nil
+            }
+
+            do {
+                let authenticatedSession = try await authService.signInWithMicrosoft()
+                session = authenticatedSession
+            } catch is CancellationError {
+                errorMessage = AuthServiceError.userCancelled.localizedDescription
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     func cancelGoogleSignIn() {
+        cancelAuthentication()
+    }
+
+    func cancelAuthentication() {
         guard isAuthenticating else {
             return
         }
@@ -788,7 +1645,59 @@ final class AuthSessionStore: ObservableObject {
         authService.cancelActiveAuthentication()
         authenticationTask?.cancel()
         isAuthenticating = false
+        activeAuthenticationProvider = nil
         errorMessage = AuthServiceError.userCancelled.localizedDescription
+    }
+
+    @discardableResult
+    func loginWithEmail(email: String, password: String) async -> EmailLoginResult? {
+        await runEmailAuthenticationOperation {
+            try await self.authService.loginWithEmail(email: email, password: password)
+        }
+    }
+
+    func startEmailRegistration(email: String, name: String?) async -> EmailChallenge? {
+        await runEmailAuthenticationOperation {
+            try await self.authService.startEmailRegistration(email: email, name: name)
+        }
+    }
+
+    func verifyEmailCode(challengeId: String, email: String, code: String) async -> EmailVerification? {
+        await runEmailAuthenticationOperation {
+            try await self.authService.verifyEmailCode(challengeId: challengeId, email: email, code: code)
+        }
+    }
+
+    func setupRegistrationTotp(
+        challengeId: String,
+        email: String,
+        verificationToken: String
+    ) async -> TotpSetup? {
+        await runEmailAuthenticationOperation {
+            try await self.authService.setupRegistrationTotp(
+                challengeId: challengeId,
+                email: email,
+                verificationToken: verificationToken
+            )
+        }
+    }
+
+    func completeEmailRegistration(input: CompleteEmailRegistrationInput) async -> AuthSession? {
+        await runEmailAuthenticationOperation {
+            try await self.authService.completeEmailRegistration(input: input)
+        }
+    }
+
+    func verifyEmailMfa(challengeId: String, email: String, code: String) async -> AuthSession? {
+        await runEmailAuthenticationOperation {
+            try await self.authService.verifyEmailMfa(challengeId: challengeId, email: email, code: code)
+        }
+    }
+
+    func resendEmailCode(challengeId: String, email: String) async -> EmailChallenge? {
+        await runEmailAuthenticationOperation {
+            try await self.authService.resendEmailCode(challengeId: challengeId, email: email)
+        }
     }
 
     func signOut() {
@@ -816,6 +1725,39 @@ final class AuthSessionStore: ObservableObject {
 
     func clearError() {
         errorMessage = nil
+    }
+
+    private func runEmailAuthenticationOperation<Value>(
+        _ operation: @escaping () async throws -> Value
+    ) async -> Value? {
+        guard !isAuthenticating else {
+            return nil
+        }
+
+        errorMessage = nil
+        isAuthenticating = true
+        activeAuthenticationProvider = .email
+
+        defer {
+            isAuthenticating = false
+            activeAuthenticationProvider = nil
+        }
+
+        do {
+            let value = try await operation()
+
+            if let authenticatedSession = value as? AuthSession {
+                session = authenticatedSession
+            } else if let loginResult = value as? EmailLoginResult,
+                      case .authenticated(let authenticatedSession) = loginResult {
+                session = authenticatedSession
+            }
+
+            return value
+        } catch {
+            errorMessage = error.localizedDescription
+            return nil
+        }
     }
 
     private func restoreSession() async {
@@ -956,7 +1898,7 @@ private final class LoopbackOAuthRedirectServer {
         }
     }
 
-    func waitForCallback(timeout: TimeInterval) async throws -> URL {
+    func waitForCallback(timeout: TimeInterval, timeoutError: Error) async throws -> URL {
         if let bufferedCallbackURL {
             return bufferedCallbackURL
         }
@@ -975,7 +1917,7 @@ private final class LoopbackOAuthRedirectServer {
 
                 group.addTask {
                     try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                    throw AuthServiceError.timedOutWaitingForGoogle
+                    throw timeoutError
                 }
 
                 let callbackURL = try await group.next() ?? {
@@ -1320,5 +2262,23 @@ private extension Data {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+private extension Dictionary where Key == String, Value == String {
+    var formURLEncodedData: Data {
+        map { key, value in
+            "\(key.formURLEncoded)=\(value.formURLEncoded)"
+        }
+        .joined(separator: "&")
+        .data(using: .utf8) ?? Data()
+    }
+}
+
+private extension String {
+    var formURLEncoded: String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: ":#[]@!$&'()*+,;=")
+        return addingPercentEncoding(withAllowedCharacters: allowed) ?? self
     }
 }

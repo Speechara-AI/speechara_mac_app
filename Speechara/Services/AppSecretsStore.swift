@@ -134,6 +134,7 @@ actor SpeecharaBackendProxyService {
         )
 
         var request = URLRequest(url: url)
+        request.setValue("Bearer \(context.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("speechara_refresh_token=\(context.refreshToken)", forHTTPHeaderField: "Cookie")
         request.setValue(context.origin, forHTTPHeaderField: "Origin")
         return request
@@ -374,6 +375,15 @@ final class SpeecharaBillingService {
 
     func fetchSummary() async throws -> SpeecharaBillingSummary {
         let configuration = try await makeConfiguration()
+        return try await fetchSummary(configuration: configuration)
+    }
+
+    func fetchSummary(accessToken: String) async throws -> SpeecharaBillingSummary {
+        let configuration = try makeConfiguration(accessToken: accessToken)
+        return try await fetchSummary(configuration: configuration)
+    }
+
+    private func fetchSummary(configuration: Configuration) async throws -> SpeecharaBillingSummary {
         let url = configuration.baseURL.appendingPathComponent("api/billing/summary")
         return try await performRequest(
             url: url,
@@ -411,6 +421,19 @@ final class SpeecharaBillingService {
         return Configuration(
             baseURL: baseURL,
             accessToken: authSession.accessToken
+        )
+    }
+
+    private func makeConfiguration(accessToken: String) throws -> Configuration {
+        guard let rawBaseURL = AppConfigurationStore.shared.resolvedValue(for: .authBackendBaseURL),
+              let baseURL = URL(string: rawBaseURL) else {
+            let value = AppConfigurationStore.shared.resolvedValue(for: .authBackendBaseURL) ?? ""
+            throw SpeecharaBillingServiceError.invalidBackendBaseURL(value)
+        }
+
+        return Configuration(
+            baseURL: baseURL,
+            accessToken: accessToken
         )
     }
 
@@ -493,13 +516,33 @@ enum AppConfigurationKind: CaseIterable, Identifiable {
     var id: Self { self }
 
     var environmentKey: String {
+        environmentKeys[0]
+    }
+
+    var environmentKeys: [String] {
         switch self {
         case .authBackendBaseURL:
-            return "SPEECHARA_AUTH_BASE_URL"
+            return ["SPEECHARA_AUTH_BASE_URL"]
         case .microsoftClientID:
-            return "SPEECHARA_MICROSOFT_CLIENT_ID"
+            return [
+                "SPEECHARA_MICROSOFT_CLIENT_ID",
+                "MICROSOFT_CLIENT_ID",
+                "VITE_MICROSOFT_CLIENT_ID_PROD",
+                "VITE_MICROSOFT_CLIENT_ID",
+            ]
         case .defaultWorkspaceID:
-            return "SPEECHARA_DEFAULT_WORKSPACE_ID"
+            return ["SPEECHARA_DEFAULT_WORKSPACE_ID"]
+        }
+    }
+
+    var bundleKey: String? {
+        switch self {
+        case .authBackendBaseURL:
+            return "SpeecharaAuthBackendBaseURL"
+        case .microsoftClientID:
+            return "SpeecharaMicrosoftClientID"
+        case .defaultWorkspaceID:
+            return nil
         }
     }
 
@@ -556,27 +599,34 @@ final class AppConfigurationStore {
             return savedValue
         }
 
+        if let bundledValue = bundledValue(for: kind) {
+            return bundledValue
+        }
+
         return kind.defaultValue
     }
 
     func environmentValue(for kind: AppConfigurationKind) -> String? {
-        let rawValue = ProcessInfo.processInfo.environment[kind.environmentKey]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let rawValue, !rawValue.isEmpty else {
-            return nil
+        for key in kind.environmentKeys {
+            if let value = normalizedConfigurationValue(ProcessInfo.processInfo.environment[key]) {
+                return value
+            }
         }
 
-        return rawValue
+        return nil
     }
 
     func savedValue(for kind: AppConfigurationKind) -> String? {
-        let rawValue = defaults.string(forKey: kind.defaultsKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let rawValue, !rawValue.isEmpty else {
+        normalizedConfigurationValue(defaults.string(forKey: kind.defaultsKey))
+    }
+
+    func bundledValue(for kind: AppConfigurationKind) -> String? {
+        guard let bundleKey = kind.bundleKey,
+              let rawValue = Bundle.main.object(forInfoDictionaryKey: bundleKey) as? String else {
             return nil
         }
 
-        return rawValue
+        return normalizedConfigurationValue(rawValue)
     }
 
     func save(_ value: String, for kind: AppConfigurationKind) {
@@ -587,6 +637,15 @@ final class AppConfigurationStore {
         }
 
         defaults.set(trimmedValue, forKey: kind.defaultsKey)
+    }
+
+    private func normalizedConfigurationValue(_ rawValue: String?) -> String? {
+        let value = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value, !value.isEmpty, !value.contains("$(") else {
+            return nil
+        }
+
+        return value
     }
 
     private func removeLegacyVendorSecrets() {

@@ -89,7 +89,24 @@ To produce a drag-to-install `.dmg` that includes the app on the left and an `Ap
 ./Scripts/create_dmg.sh
 ```
 
-From Xcode you can also select the shared `Package DMG` scheme and press `Product > Build` (`Cmd+B`). That scheme builds the Release app, packages the DMG, and then reveals the finished file in Finder without opening the image.
+From Xcode you can also select the shared `Package DMG` scheme and press `Product > Build` (`Cmd+B`). That scheme builds the Release app, verifies Developer ID notarization, packages the DMG, and then reveals the finished file in Finder without opening the image.
+
+DMG packaging is distribution-strict by default: the `.app` must be signed with `Developer ID Application` and must have a stapled notarization ticket before it is copied into the image. If the ticket is missing, the script submits the app with `xcrun notarytool submit --wait`, staples the accepted ticket, validates Gatekeeper, and only then creates the DMG. Configure notarization once with:
+
+```bash
+xcrun notarytool store-credentials speechara-notary \
+  --apple-id your-apple-id@example.com \
+  --team-id P7FFVJWCKW \
+  --password app-specific-password
+```
+
+Then package an exported app with:
+
+```bash
+./Scripts/create_dmg.sh --app /absolute/path/to/Speechara.app --skip-build --notary-profile speechara-notary
+```
+
+Use `--skip-notarization` only for local-only test images.
 
 The script builds the `Release` app, generates a simple installer background, configures the Finder window layout, and writes the final artifact to:
 
@@ -102,6 +119,7 @@ Useful options:
 ```bash
 ./Scripts/create_dmg.sh --unsigned
 ./Scripts/create_dmg.sh --app /absolute/path/to/Speechara.app --skip-build
+./Scripts/create_dmg.sh --app /absolute/path/to/Speechara.app --skip-build --notary-profile speechara-notary
 ./Scripts/create_dmg.sh --no-layout
 ./Scripts/create_dmg.sh --reveal
 ```

@@ -639,11 +639,15 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     var canSummarizeSource: Bool {
-        !isTranscriptSummaryLoading && !subtitlesText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !hasGeneratedMeetingSummary
+            && !isTranscriptSummaryLoading
+            && !subtitlesText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var canSummarizeTranslation: Bool {
-        !isTranslationSummaryLoading && !translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !hasGeneratedMeetingSummary
+            && !isTranslationSummaryLoading
+            && !translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var canGenerateSourceProtocol: Bool {
@@ -1245,6 +1249,10 @@ final class SubtitleViewModel: ObservableObject {
 
     private var preferredMeetingHistorySummaryText: String? {
         transcriptSummaryText.nilIfEmpty ?? translationSummaryText.nilIfEmpty
+    }
+
+    private var hasGeneratedMeetingSummary: Bool {
+        preferredMeetingHistorySummaryText != nil
     }
 
     private var preferredMeetingHistoryProtocolText: String? {
@@ -2691,7 +2699,8 @@ final class SubtitleViewModel: ObservableObject {
               !isTranscriptProtocolLoading,
               !isTranslationProtocolLoading,
               !isTranscriptAnswerLoading,
-              !isTranslationAnswerLoading else {
+              !isTranslationAnswerLoading,
+              !hasGeneratedMeetingSummary else {
             return
         }
 
@@ -2699,6 +2708,8 @@ final class SubtitleViewModel: ObservableObject {
         guard !trimmedTranscript.isEmpty else {
             return
         }
+
+        let summaryGeneration = meetingHistoryConversationGeneration
 
         switch target {
         case .source:
@@ -2733,6 +2744,9 @@ final class SubtitleViewModel: ObservableObject {
                     inputLanguageName: inputLanguageName,
                     outputLanguageName: outputLanguageName
                 )
+                guard summaryGeneration == meetingHistoryConversationGeneration else {
+                    return
+                }
                 switch target {
                 case .source:
                     transcriptSummaryText = summary
@@ -2744,6 +2758,9 @@ final class SubtitleViewModel: ObservableObject {
                 scheduleMeetingHistorySnapshotSync(status: .active)
             } catch {
                 let fallback = localFallbackSummary(from: trimmedTranscript)
+                guard summaryGeneration == meetingHistoryConversationGeneration else {
+                    return
+                }
                 switch target {
                 case .source:
                     transcriptSummaryText = fallback

@@ -22,6 +22,9 @@ struct SpeecharaApp: App {
     }
 
     init() {
+#if !APP_STORE
+        SpeecharaUpdateController.shared.activate()
+#endif
         SpeecharaLocalizationStore.shared.installBundleOverrideIfNeeded()
         let viewModel = SubtitleViewModel()
         _subtitleViewModel = StateObject(wrappedValue: viewModel)
@@ -57,7 +60,6 @@ struct SpeecharaApp: App {
                 .preferredColorScheme(appearanceMode.preferredColorScheme)
                 .id(localizationStore.language.rawValue)
         }
-        .windowResizability(.contentSize)
 
         Window(SL("Listening"), id: "speechara-listening-mini") {
             SpeecharaListeningMiniView()
@@ -144,6 +146,17 @@ final class SpeecharaAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         return true
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        let handledAuthCallback = urls.contains { AuthService.shared.handleIncomingURL($0) }
+
+        guard handledAuthCallback else {
+            return
+        }
+
+        NotificationCenter.default.post(name: .speecharaOpenMainWindow, object: nil)
+        application.activate(ignoringOtherApps: true)
     }
 }
 
@@ -395,7 +408,13 @@ private struct SpeecharaMenuBarMenu: View {
             openSettingsWindow()
         }
 
+#if !APP_STORE
+        Button(SL("Check for Updates...")) {
+            SpeecharaUpdateController.shared.checkForUpdates()
+        }
+
         Divider()
+#endif
 
         Button(SL("Quit Speechara completely")) {
             NSApp.terminate(nil)
@@ -471,6 +490,14 @@ private struct SpeecharaFileCommands: Commands {
     @AppStorage("speechara.uiLanguage") private var selectedLanguageRawValue = SpeecharaLocalizationStore.shared.language.rawValue
 
     var body: some Commands {
+#if !APP_STORE
+        CommandGroup(after: .appInfo) {
+            Button(SL("Check for Updates...")) {
+                SpeecharaUpdateController.shared.checkForUpdates()
+            }
+        }
+#endif
+
         CommandGroup(after: .newItem) {
             Divider()
 

@@ -70,77 +70,63 @@ struct ContentView: View {
 
     private var heroSection: some View {
         SurfaceCard(accent: primaryActionTint.opacity(0.16)) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .center, spacing: 18) {
-                    HStack(spacing: 10) {
-                        LiveStatusPill(
-                            title: primaryStatusTitle,
-                            systemImage: primaryStatusIcon,
-                            tint: primaryStatusColor
-                        )
+            HStack(alignment: .center, spacing: 12) {
+                if !isFocusModeEnabled {
+                    PrimaryActionButton(
+                        title: primaryActionTitle,
+                        subtitle: viewModel.hasActiveSession ? nil : SL("system audio"),
+                        systemImage: primaryActionIcon,
+                        tint: primaryActionTint,
+                        action: handlePrimaryAction
+                    )
+                    .disabled(primaryActionDisabled)
+                    .opacity(primaryActionDisabled ? 0.55 : 1)
 
-                        if let activityText = viewModel.assistantActivityText {
-                            LiveStatusPill(
-                                title: activityText,
-                                systemImage: "sparkles",
-                                tint: Color(red: 0.56, green: 0.35, blue: 0.88)
-                            )
-                        }
-                    }
+                    MicrophoneControl(
+                        viewModel: viewModel
+                    )
 
-                    Spacer()
-
-                    if !isFocusModeEnabled && !isLivePreviewVisible {
-                        ToolbarSecondaryButton(
-                            title: "Show Preview",
-                            systemImage: "eye"
-                        ) {
-                            isLivePreviewVisible = true
-                        }
-                    }
-
-                    ToolbarSecondaryButton(
-                        title: "New Session",
-                        systemImage: "plus.circle"
-                    ) {
-                        viewModel.startNewSession()
-                    }
-
-                    ToolbarSecondaryButton(
-                        title: isFocusModeEnabled ? "Exit Focus" : "Focus Mode",
-                        systemImage: isFocusModeEnabled ? "rectangle.compress.vertical" : "rectangle.expand.vertical",
-                        isActive: isFocusModeEnabled
-                    ) {
-                        isFocusModeEnabled.toggle()
+                    if showsSessionToolbarControls {
+                        settingsStrip
                     }
                 }
 
-                if !isFocusModeEnabled {
-                    HStack(alignment: .center, spacing: 12) {
-                        PrimaryActionButton(
-                            title: primaryActionTitle,
-                            subtitle: viewModel.hasActiveSession ? nil : SL("system audio"),
-                            systemImage: primaryActionIcon,
-                            tint: primaryActionTint,
-                            action: handlePrimaryAction
-                        )
-                        .disabled(primaryActionDisabled)
-                        .opacity(primaryActionDisabled ? 0.55 : 1)
+                if let activityText = viewModel.assistantActivityText {
+                    LiveStatusPill(
+                        title: activityText,
+                        systemImage: "sparkles",
+                        tint: Color(red: 0.56, green: 0.35, blue: 0.88)
+                    )
+                }
 
-                        MicrophoneControl(
-                            viewModel: viewModel
-                        )
+                Spacer(minLength: 12)
 
-                        if showsSessionToolbarControls {
-                            settingsStrip
+                if !isFocusModeEnabled && showsSessionToolbarControls {
+                    savedAudioStrip
+                }
 
-                            Spacer()
-
-                            savedAudioStrip
-                        } else {
-                            Spacer()
-                        }
+                if !isFocusModeEnabled && !isLivePreviewVisible {
+                    ToolbarSecondaryButton(
+                        title: "Show Preview",
+                        systemImage: "eye"
+                    ) {
+                        isLivePreviewVisible = true
                     }
+                }
+
+                ToolbarSecondaryButton(
+                    title: "New Session",
+                    systemImage: "plus.circle"
+                ) {
+                    viewModel.startNewSession()
+                }
+
+                ToolbarSecondaryButton(
+                    title: isFocusModeEnabled ? "Exit Focus" : "Focus Mode",
+                    systemImage: isFocusModeEnabled ? "rectangle.compress.vertical" : "rectangle.expand.vertical",
+                    isActive: isFocusModeEnabled
+                ) {
+                    isFocusModeEnabled.toggle()
                 }
             }
         }
@@ -551,54 +537,6 @@ struct ContentView: View {
                 && viewModel.translatedText.isEmpty
                 && viewModel.liveSubtitlePreview.isEmpty
         )
-    }
-
-    private var primaryStatusTitle: String {
-        if viewModel.isBusy {
-            return SL("Preparing session")
-        }
-
-        if viewModel.hasActiveSession {
-            return SL("Listening")
-        }
-
-        if viewModel.status == .stopped {
-            return SL("Listening stopped")
-        }
-
-        return SL("Ready to listen")
-    }
-
-    private var primaryStatusIcon: String {
-        if viewModel.isBusy {
-            return "arrow.triangle.2.circlepath"
-        }
-
-        if viewModel.isSystemAudioListening {
-            return "dot.radiowaves.left.and.right"
-        }
-
-        if viewModel.isMicrophoneListening {
-            return "mic.fill"
-        }
-
-        return "pause.circle.fill"
-    }
-
-    private var primaryStatusColor: Color {
-        if viewModel.isBusy {
-            return .orange
-        }
-
-        if viewModel.isSystemAudioListening {
-            return .green
-        }
-
-        if viewModel.isMicrophoneListening {
-            return Color(red: 0.84, green: 0.16, blue: 0.17)
-        }
-
-        return .red
     }
 
     private var primaryActionTitle: String {

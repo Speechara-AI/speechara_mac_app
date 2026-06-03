@@ -192,10 +192,8 @@ struct SpeecharaProfileView: View {
             isRefreshingProfile = false
         }
 
-        async let profileResult = loadProfileRefreshResult()
-        async let billingResult = loadBillingSummaryResult()
-
-        let (resolvedProfileResult, resolvedBillingResult) = await (profileResult, billingResult)
+        let resolvedProfileResult = await loadProfileRefreshResult()
+        let resolvedBillingResult = await loadBillingSummaryResult()
 
         switch resolvedProfileResult {
         case .success:
@@ -224,6 +222,10 @@ struct SpeecharaProfileView: View {
 
     private func loadBillingSummaryResult() async -> Result<SpeecharaBillingSummary, Error> {
         do {
+            if let accessToken = authStore.session?.accessToken {
+                return .success(try await billingService.fetchSummary(accessToken: accessToken))
+            }
+
             return .success(try await billingService.fetchSummary())
         } catch {
             return .failure(error)

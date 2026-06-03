@@ -91,7 +91,7 @@ struct AuthenticationView: View {
             Text("Sign In")
                 .font(.system(size: 44, weight: .semibold, design: .serif))
 
-            Text("Use Google, Microsoft, or a Speechara email/password account.")
+            Text("Use Google, Microsoft, Apple, or a Speechara email/password account.")
                 .font(.system(size: 16, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -115,6 +115,14 @@ struct AuthenticationView: View {
             ) {
                 clearMessages()
                 authStore.signInWithMicrosoft()
+            }
+
+            providerButton(
+                title: authStore.activeAuthenticationProvider == .apple ? "Waiting for Apple..." : "Continue with Apple",
+                mark: AnyView(AppleMark())
+            ) {
+                clearMessages()
+                authStore.signInWithApple()
             }
         }
     }
@@ -624,6 +632,8 @@ struct AuthenticationView: View {
         switch provider {
         case .google, .microsoft:
             return "Speechara opened your default browser. Finish \(provider.displayName) sign-in there and the app will activate again automatically."
+        case .apple:
+            return "Complete Apple sign-in in the system prompt."
         case .email:
             return "Checking your Speechara account..."
         }
@@ -856,6 +866,15 @@ private struct MicrosoftMark: View {
             }
         }
         .frame(width: 28, height: 28)
+    }
+}
+
+private struct AppleMark: View {
+    var body: some View {
+        Image(systemName: "apple.logo")
+            .font(.system(size: 24, weight: .semibold))
+            .foregroundStyle(.primary)
+            .frame(width: 28, height: 28)
     }
 }
 

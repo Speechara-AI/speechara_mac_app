@@ -1,4 +1,5 @@
 import AppKit
+import AuthenticationServices
 import Combine
 import CryptoKit
 import Foundation
@@ -289,6 +290,11 @@ private extension String {
         let value = trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value
     }
+
+    var sha256HexDigest: String {
+        let digest = SHA256.hash(data: Data(utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
 }
 
 private struct FlexibleCodingKey: CodingKey {
@@ -357,6 +363,7 @@ enum AuthServiceError: LocalizedError {
     case missingMicrosoftClientID
     case invalidBackendBaseURL(String)
     case browserOpenFailed
+    case appleCredentialMissingToken
     case microsoftIDTokenMissing
     case invalidCallback
     case callbackStateMismatch
@@ -373,11 +380,13 @@ enum AuthServiceError: LocalizedError {
         case .missingBackendBaseURL:
             return "Sign-in is not configured yet. Add the auth backend URL in Settings first."
         case .missingMicrosoftClientID:
-            return "Microsoft sign-in is not configured yet. Add the Microsoft client ID in Settings first."
+            return "Microsoft sign-in is not configured yet. Add the Microsoft client ID in Settings or bundle it with the app build."
         case .invalidBackendBaseURL(let value):
             return "The saved auth backend URL is invalid: \(value)"
         case .browserOpenFailed:
             return "Speechara could not open the system browser for sign-in."
+        case .appleCredentialMissingToken:
+            return "Apple sign-in completed, but Apple did not return an identity token."
         case .microsoftIDTokenMissing:
             return "Microsoft sign-in completed, but Microsoft did not return an ID token."
         case .invalidCallback:
@@ -409,55 +418,64 @@ final class AuthService {
         let baseURL: URL
     }
 
-    private struct DeviceInfo: Codable {
-        let platform: String
-        let deviceName: String
-        let appVersion: String
-        let buildNumber: String
-    }
-
-    private struct AuthorizationStartRequest: Encodable {
-        let redirectURI: String
-        let state: String
-        let codeChallenge: String
-        let codeChallengeMethod: String
-        let device: DeviceInfo
-
-        enum CodingKeys: String, CodingKey {
-            case redirectURI = "redirect_uri"
-            case state
-            case codeChallenge = "code_challenge"
-            case codeChallengeMethod = "code_challenge_method"
-            case device
-        }
-    }
-
-    private struct AuthorizationStartResponse: Decodable {
-        let authorizationURL: String
-
-        enum CodingKeys: String, CodingKey {
-            case authorizationURL = "authorization_url"
-        }
-    }
-
-    private struct TokenExchangeRequest: Encodable {
+    private struct DesktopAuthExchangeRequest: Encodable {
         let code: String
         let state: String
-        let codeVerifier: String
-        let redirectURI: String
-        let device: DeviceInfo
-
-        enum CodingKeys: String, CodingKey {
-            case code
-            case state
-            case codeVerifier = "code_verifier"
-            case redirectURI = "redirect_uri"
-            case device
-        }
     }
 
     private struct MicrosoftAPIExchangeRequest: Encodable {
         let idToken: String
+    }
+
+    private struct AppleAPIExchangeRequest: Encodable {
+        struct User: Encodable {
+            struct Name: Encodable {
+                let firstName: String?
+                let lastName: String?
+            }
+
+            let name: Name?
+            let email: String?
+        }
+
+        let idToken: String
+        let authorizationCode: String?
+        let nonce: String
+        let state: String
+        let user: User?
+    }
+
+    private struct AppleIDTokenDebugClaims: Decodable {
+        let issuer: String?
+        let audience: Audience?
+
+        enum CodingKeys: String, CodingKey {
+            case issuer = "iss"
+            case audience = "aud"
+        }
+
+        enum Audience: Decodable {
+            case string(String)
+            case strings([String])
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.singleValueContainer()
+                if let value = try? container.decode(String.self) {
+                    self = .string(value)
+                } else {
+                    self = .strings(try container.decode([String].self))
+                }
+            }
+
+            var description: String {
+                switch self {
+                case .string(let value):
+                    return value
+                case .strings(let values):
+                    return values.joined(separator: ",")
+                }
+            }
+        }
     }
 
     private struct MicrosoftTokenResponse: Decodable {
@@ -683,9 +701,9 @@ final class AuthService {
         let state: String
         let codeVerifier: String
 
-        init() {
-            state = Self.randomURLSafeString(length: 32)
-            codeVerifier = Self.randomURLSafeString(length: 64)
+        init() throws {
+            state = try Self.randomURLSafeString(length: 32)
+            codeVerifier = try Self.randomURLSafeString(length: 64)
         }
 
         var codeChallenge: String {
@@ -693,12 +711,51 @@ final class AuthService {
             return Data(digest).base64URLEncodedString()
         }
 
-        private static func randomURLSafeString(length: Int) -> String {
-            let raw = UUID().uuidString.replacingOccurrences(of: "-", with: "")
-            var combined = raw
+        private static func randomURLSafeString(length: Int) throws -> String {
+            var combined = ""
 
             while combined.count < length {
-                combined.append(UUID().uuidString.replacingOccurrences(of: "-", with: ""))
+                var bytes = [UInt8](repeating: 0, count: 32)
+                let byteCount = bytes.count
+                let status = bytes.withUnsafeMutableBytes { buffer in
+                    guard let baseAddress = buffer.baseAddress else {
+                        return errSecParam
+                    }
+                    return SecRandomCopyBytes(kSecRandomDefault, byteCount, baseAddress)
+                }
+                guard status == errSecSuccess else {
+                    throw AuthServiceError.requestFailed("Speechara could not create secure OAuth randomness.")
+                }
+                combined.append(Data(bytes).base64URLEncodedString())
+            }
+
+            return String(combined.prefix(length))
+        }
+    }
+
+    private struct DesktopOAuthTransaction {
+        let state: String
+
+        init() throws {
+            state = try Self.randomURLSafeString(length: 32)
+        }
+
+        private static func randomURLSafeString(length: Int) throws -> String {
+            var combined = ""
+
+            while combined.count < length {
+                var bytes = [UInt8](repeating: 0, count: 32)
+                let byteCount = bytes.count
+                let status = bytes.withUnsafeMutableBytes { buffer in
+                    guard let baseAddress = buffer.baseAddress else {
+                        return errSecParam
+                    }
+                    return SecRandomCopyBytes(kSecRandomDefault, byteCount, baseAddress)
+                }
+                guard status == errSecSuccess else {
+                    throw AuthServiceError.requestFailed("Speechara could not create secure OAuth randomness.")
+                }
+                combined.append(Data(bytes).base64URLEncodedString())
             }
 
             return String(combined.prefix(length))
@@ -711,6 +768,8 @@ final class AuthService {
     private let encoder: JSONEncoder
     private let sessionAccount = "speechara.auth.session"
     private var activeRedirectServer: LoopbackOAuthRedirectServer?
+    private var activeDesktopCallbackWaiter: DesktopOAuthCallbackWaiter?
+    private var activeAppleAuthorizationSession: AppleAuthorizationSession?
 
     private init(
         session: URLSession = .shared,
@@ -745,25 +804,45 @@ final class AuthService {
     func cancelActiveAuthentication() {
         activeRedirectServer?.cancel()
         activeRedirectServer = nil
+        activeDesktopCallbackWaiter?.cancel()
+        activeDesktopCallbackWaiter = nil
+        activeAppleAuthorizationSession?.cancel()
+        activeAppleAuthorizationSession = nil
+    }
+
+    @discardableResult
+    func handleIncomingURL(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "speechara",
+              url.host?.lowercased() == "auth" else {
+            return false
+        }
+
+        if url.path == "/microsoft/complete" {
+            return true
+        }
+
+        guard url.path == "/callback" else {
+            return false
+        }
+
+        activeDesktopCallbackWaiter?.receive(url)
+        return true
     }
 
     func signInWithGoogle() async throws -> AuthSession {
         let configuration = try makeConfiguration()
-        let transaction = OAuthPKCETransaction()
-        let redirectServer = try LoopbackOAuthRedirectServer(callbackPath: "/oauth/google/callback")
+        let transaction = try DesktopOAuthTransaction()
+        let callbackWaiter = DesktopOAuthCallbackWaiter()
 
-        activeRedirectServer = redirectServer
+        activeDesktopCallbackWaiter = callbackWaiter
         defer {
-            redirectServer.cancel()
-            activeRedirectServer = nil
+            callbackWaiter.cancel()
+            activeDesktopCallbackWaiter = nil
         }
 
-        try await redirectServer.start()
-
-        let authorizationURL = try await requestAuthorizationURL(
+        let authorizationURL = try makeGoogleDesktopAuthorizationURL(
             configuration: configuration,
-            transaction: transaction,
-            redirectURI: redirectServer.redirectURL
+            state: transaction.state
         )
 
         let didOpenBrowser = await MainActor.run {
@@ -774,7 +853,7 @@ final class AuthService {
             throw AuthServiceError.browserOpenFailed
         }
 
-        let callbackURL = try await redirectServer.waitForCallback(
+        let callbackURL = try await callbackWaiter.waitForCallback(
             timeout: 300,
             timeoutError: AuthServiceError.timedOutWaitingForGoogle
         )
@@ -789,12 +868,10 @@ final class AuthService {
             throw AuthServiceError.callbackStateMismatch
         }
 
-        let authenticatedSession = try await exchangeCode(
+        let authenticatedSession = try await exchangeDesktopAuthCode(
             configuration: configuration,
             code: payload.code,
-            state: payload.state,
-            codeVerifier: transaction.codeVerifier,
-            redirectURI: redirectServer.redirectURL
+            state: payload.state
         )
 
         try persistSession(authenticatedSession)
@@ -805,7 +882,7 @@ final class AuthService {
     func signInWithMicrosoft() async throws -> AuthSession {
         _ = try makeConfiguration()
         let clientID = try makeMicrosoftClientID()
-        let transaction = OAuthPKCETransaction()
+        let transaction = try OAuthPKCETransaction()
         let redirectServer = try LoopbackOAuthRedirectServer(callbackPath: "/oauth/microsoft/callback")
 
         activeRedirectServer = redirectServer
@@ -866,6 +943,34 @@ final class AuthService {
             method: "POST",
             body: requestBody,
             bearerToken: nil
+        )
+
+        try persistSession(authenticatedSession)
+        return authenticatedSession
+    }
+
+    @MainActor
+    func signInWithApple() async throws -> AuthSession {
+        let configuration = try makeConfiguration()
+        let transaction = try OAuthPKCETransaction()
+        let appleSession = AppleAuthorizationSession(
+            rawNonce: transaction.codeVerifier,
+            state: transaction.state
+        )
+
+        activeAppleAuthorizationSession = appleSession
+        defer {
+            appleSession.cancel()
+            activeAppleAuthorizationSession = nil
+        }
+
+        let authorization = try await appleSession.start()
+
+        let authenticatedSession = try await exchangeAppleAuthorization(
+            configuration: configuration,
+            authorization: authorization,
+            rawNonce: transaction.codeVerifier,
+            state: transaction.state
         )
 
         try persistSession(authenticatedSession)
@@ -1068,6 +1173,10 @@ final class AuthService {
 
     func refreshCurrentUserProfile() async throws -> AuthSession {
         let currentSession = try await activeSession()
+        return try await refreshCurrentUserProfile(using: currentSession)
+    }
+
+    func refreshCurrentUserProfile(using currentSession: AuthSession) async throws -> AuthSession {
         let response: CurrentUserProfileResponse = try await performJSONRequest(
             url: makeCurrentUserURL(),
             method: "GET",
@@ -1097,27 +1206,19 @@ final class AuthService {
         return updatedSession
     }
 
-    private func requestAuthorizationURL(
+    private func makeGoogleDesktopAuthorizationURL(
         configuration: Configuration,
-        transaction: OAuthPKCETransaction,
-        redirectURI: URL
-    ) async throws -> URL {
-        let requestBody = AuthorizationStartRequest(
-            redirectURI: redirectURI.absoluteString,
-            state: transaction.state,
-            codeChallenge: transaction.codeChallenge,
-            codeChallengeMethod: "S256",
-            device: Self.currentDeviceInfo
+        state: String
+    ) throws -> URL {
+        var components = URLComponents(
+            url: configuration.baseURL.appendingPathComponent("api/auth/google/desktop/start"),
+            resolvingAgainstBaseURL: false
         )
+        components?.queryItems = [
+            URLQueryItem(name: "state", value: state),
+        ]
 
-        let response: AuthorizationStartResponse = try await performJSONRequest(
-            url: configuration.baseURL.appendingPathComponent("v1/auth/google/native/start"),
-            method: "POST",
-            body: requestBody,
-            bearerToken: nil
-        )
-
-        guard let url = URL(string: response.authorizationURL) else {
+        guard let url = components?.url else {
             throw AuthServiceError.invalidResponse
         }
 
@@ -1185,29 +1286,93 @@ final class AuthService {
         return idToken
     }
 
-    private func exchangeCode(
+    private func exchangeDesktopAuthCode(
         configuration: Configuration,
         code: String,
-        state: String,
-        codeVerifier: String,
-        redirectURI: URL
+        state: String
     ) async throws -> AuthSession {
-        let requestBody = TokenExchangeRequest(
+        let requestBody = DesktopAuthExchangeRequest(
             code: code,
-            state: state,
-            codeVerifier: codeVerifier,
-            redirectURI: redirectURI.absoluteString,
-            device: Self.currentDeviceInfo
+            state: state
         )
 
         let response: SessionResponse = try await performJSONRequest(
-            url: configuration.baseURL.appendingPathComponent("v1/auth/google/native/exchange"),
+            url: configuration.baseURL.appendingPathComponent("api/auth/desktop/exchange"),
             method: "POST",
             body: requestBody,
             bearerToken: nil
         )
 
         return try response.session(fallbackRefreshToken: nil)
+    }
+
+    private func exchangeAppleAuthorization(
+        configuration: Configuration,
+        authorization: AppleAuthorizationResult,
+        rawNonce: String,
+        state: String
+    ) async throws -> AuthSession {
+        guard let idToken = authorization.idToken.nonEmptyTrimmed else {
+            throw AuthServiceError.appleCredentialMissingToken
+        }
+
+#if DEBUG
+        if let claims = Self.debugClaims(fromAppleIDToken: idToken) {
+            print(
+                [
+                    "Speechara Apple Sign-In debug",
+                    "aud=\(claims.audience?.description ?? "<missing>")",
+                    "iss=\(claims.issuer ?? "<missing>")",
+                    "bundleID=\(Bundle.main.bundleIdentifier ?? "<missing>")",
+                    "backend=\(configuration.baseURL.absoluteString)",
+                ].joined(separator: " | ")
+            )
+        } else {
+            print(
+                [
+                    "Speechara Apple Sign-In debug",
+                    "could not decode idToken claims",
+                    "bundleID=\(Bundle.main.bundleIdentifier ?? "<missing>")",
+                    "backend=\(configuration.baseURL.absoluteString)",
+                ].joined(separator: " | ")
+            )
+        }
+#endif
+
+        let firstName = authorization.firstName.nonEmptyTrimmed
+        let lastName = authorization.lastName.nonEmptyTrimmed
+        let email = authorization.email.nonEmptyTrimmed
+        let name = firstName != nil || lastName != nil
+            ? AppleAPIExchangeRequest.User.Name(firstName: firstName, lastName: lastName)
+            : nil
+        let user = name != nil || email != nil
+            ? AppleAPIExchangeRequest.User(name: name, email: email)
+            : nil
+
+        let requestBody = AppleAPIExchangeRequest(
+            idToken: idToken,
+            authorizationCode: authorization.authorizationCode.nonEmptyTrimmed,
+            nonce: rawNonce,
+            state: state,
+            user: user
+        )
+
+        return try await performAuthSessionRequest(
+            url: configuration.baseURL.appendingPathComponent("api/auth/apple"),
+            method: "POST",
+            body: requestBody,
+            bearerToken: nil
+        )
+    }
+
+    private static func debugClaims(fromAppleIDToken idToken: String) -> AppleIDTokenDebugClaims? {
+        let parts = idToken.split(separator: ".")
+        guard parts.count >= 2,
+              let payloadData = Data(base64URLEncoded: String(parts[1])) else {
+            return nil
+        }
+
+        return try? JSONDecoder().decode(AppleIDTokenDebugClaims.self, from: payloadData)
     }
 
     private func makeConfiguration() throws -> Configuration {
@@ -1425,19 +1590,6 @@ final class AuthService {
         }
     }
 
-    private static var currentDeviceInfo: DeviceInfo {
-        let info = Bundle.main.infoDictionary ?? [:]
-        let version = info["CFBundleShortVersionString"] as? String ?? "0"
-        let build = info["CFBundleVersion"] as? String ?? "0"
-
-        return DeviceInfo(
-            platform: "macOS",
-            deviceName: Host.current().localizedName ?? "Mac",
-            appVersion: version,
-            buildNumber: build
-        )
-    }
-
     private static func refreshToken(from response: HTTPURLResponse) -> String? {
         if let url = response.url,
            let cookieToken = HTTPCookieStorage.shared
@@ -1501,6 +1653,7 @@ final class AuthService {
 enum AuthenticationProvider: Equatable {
     case google
     case microsoft
+    case apple
     case email
 
     var displayName: String {
@@ -1509,6 +1662,8 @@ enum AuthenticationProvider: Equatable {
             return "Google"
         case .microsoft:
             return "Microsoft"
+        case .apple:
+            return "Apple"
         case .email:
             return "email"
         }
@@ -1552,7 +1707,17 @@ final class AuthSessionStore: ObservableObject {
     }
 
     func refreshCurrentUserProfile() async throws {
-        session = try await authService.refreshCurrentUserProfile()
+        let currentSession: AuthSession
+        if let existingSession = session {
+            currentSession = existingSession.needsRefresh
+                ? try await authService.refreshSession(using: existingSession.refreshToken)
+                : existingSession
+        } else {
+            currentSession = try await authService.activeSession()
+        }
+
+        session = try await authService.refreshCurrentUserProfile(using: currentSession)
+        errorMessage = nil
     }
 
     @discardableResult
@@ -1624,6 +1789,33 @@ final class AuthSessionStore: ObservableObject {
 
             do {
                 let authenticatedSession = try await authService.signInWithMicrosoft()
+                session = authenticatedSession
+            } catch is CancellationError {
+                errorMessage = AuthServiceError.userCancelled.localizedDescription
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func signInWithApple() {
+        guard !isAuthenticating else {
+            return
+        }
+
+        errorMessage = nil
+        isAuthenticating = true
+        activeAuthenticationProvider = .apple
+
+        authenticationTask = Task {
+            defer {
+                isAuthenticating = false
+                activeAuthenticationProvider = nil
+                authenticationTask = nil
+            }
+
+            do {
+                let authenticatedSession = try await authService.signInWithApple()
                 session = authenticatedSession
             } catch is CancellationError {
                 errorMessage = AuthServiceError.userCancelled.localizedDescription
@@ -1785,6 +1977,112 @@ final class AuthSessionStore: ObservableObject {
 
 private struct EmptyResponse: Decodable {}
 
+private struct AppleAuthorizationResult {
+    let idToken: String?
+    let authorizationCode: String?
+    let firstName: String?
+    let lastName: String?
+    let email: String?
+}
+
+private final class AppleAuthorizationSession: NSObject, ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
+    private let rawNonce: String
+    private let state: String
+    private var controller: ASAuthorizationController?
+    private var continuation: CheckedContinuation<AppleAuthorizationResult, Error>?
+
+    init(rawNonce: String, state: String) {
+        self.rawNonce = rawNonce
+        self.state = state
+        super.init()
+    }
+
+    func start() async throws -> AppleAuthorizationResult {
+        try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+
+            let request = ASAuthorizationAppleIDProvider().createRequest()
+            request.requestedScopes = [.fullName, .email]
+            request.nonce = rawNonce.sha256HexDigest
+            request.state = state
+
+            let controller = ASAuthorizationController(authorizationRequests: [request])
+            controller.delegate = self
+            controller.presentationContextProvider = self
+            self.controller = controller
+            controller.performRequests()
+        }
+    }
+
+    func cancel() {
+        guard continuation != nil else {
+            return
+        }
+
+        controller?.cancel()
+        finish(with: .failure(CancellationError()))
+    }
+
+    func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
+        NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first ?? NSWindow()
+    }
+
+    func authorizationController(
+        controller: ASAuthorizationController,
+        didCompleteWithAuthorization authorization: ASAuthorization
+    ) {
+        guard let credential = authorization.credential as? ASAuthorizationAppleIDCredential else {
+            finish(with: .failure(AuthServiceError.invalidResponse))
+            return
+        }
+
+        guard credential.state == state else {
+            finish(with: .failure(AuthServiceError.callbackStateMismatch))
+            return
+        }
+
+        finish(
+            with: .success(
+                AppleAuthorizationResult(
+                    idToken: credential.identityToken.flatMap { String(data: $0, encoding: .utf8) },
+                    authorizationCode: credential.authorizationCode.flatMap { String(data: $0, encoding: .utf8) },
+                    firstName: credential.fullName?.givenName,
+                    lastName: credential.fullName?.familyName,
+                    email: credential.email
+                )
+            )
+        )
+    }
+
+    func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
+        let nsError = error as NSError
+        if nsError.domain == ASAuthorizationError.errorDomain,
+           nsError.code == ASAuthorizationError.canceled.rawValue {
+            finish(with: .failure(CancellationError()))
+        } else {
+            finish(with: .failure(error))
+        }
+    }
+
+    private func finish(with result: Result<AppleAuthorizationResult, Error>) {
+        guard let continuation else {
+            return
+        }
+
+        self.continuation = nil
+        controller?.delegate = nil
+        controller?.presentationContextProvider = nil
+        controller = nil
+
+        switch result {
+        case .success(let authorization):
+            continuation.resume(returning: authorization)
+        case .failure(let error):
+            continuation.resume(throwing: error)
+        }
+    }
+}
+
 private final class KeychainStore {
     private let service: String
 
@@ -1838,7 +2136,94 @@ private final class KeychainStore {
     }
 }
 
+private final class DesktopOAuthCallbackWaiter: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "com.alexdem.speechara.auth.deeplink")
+    private var callbackContinuation: CheckedContinuation<URL, Error>?
+    private var bufferedCallbackURL: URL?
+    private var terminalError: Error?
+
+    func receive(_ url: URL) {
+        queue.async {
+            self.finishCallbackLocked(with: .success(url))
+        }
+    }
+
+    func waitForCallback(timeout: TimeInterval, timeoutError: Error) async throws -> URL {
+        try await withTaskCancellationHandler {
+            try await withThrowingTaskGroup(of: URL.self) { group in
+                group.addTask {
+                    try await self.nextCallback()
+                }
+
+                group.addTask {
+                    try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                    throw timeoutError
+                }
+
+                let callbackURL = try await group.next() ?? {
+                    throw AuthServiceError.invalidCallback
+                }()
+
+                group.cancelAll()
+                return callbackURL
+            }
+        } onCancel: {
+            self.cancel()
+        }
+    }
+
+    func cancel() {
+        queue.async {
+            self.finishCallbackLocked(with: .failure(CancellationError()))
+        }
+    }
+
+    private func nextCallback() async throws -> URL {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                if let bufferedCallbackURL = self.bufferedCallbackURL {
+                    self.bufferedCallbackURL = nil
+                    continuation.resume(returning: bufferedCallbackURL)
+                    return
+                }
+
+                if let terminalError = self.terminalError {
+                    continuation.resume(throwing: terminalError)
+                    return
+                }
+
+                self.callbackContinuation = continuation
+            }
+        }
+    }
+
+    private func finishCallbackLocked(with result: Result<URL, Error>) {
+        guard terminalError == nil else {
+            return
+        }
+
+        switch result {
+        case .success(let url):
+            if let callbackContinuation {
+                self.callbackContinuation = nil
+                callbackContinuation.resume(returning: url)
+            } else if bufferedCallbackURL == nil {
+                bufferedCallbackURL = url
+            }
+        case .failure(let error):
+            if let callbackContinuation {
+                self.callbackContinuation = nil
+                callbackContinuation.resume(throwing: error)
+            } else {
+                terminalError = error
+            }
+        }
+    }
+}
+
 private final class LoopbackOAuthRedirectServer {
+    private static let redirectHost = "localhost"
+
     private let callbackPath: String
     private let port: UInt16
     private let queue = DispatchQueue(label: "com.alexdem.speechara.auth.loopback")
@@ -1847,9 +2232,10 @@ private final class LoopbackOAuthRedirectServer {
     private var startContinuation: CheckedContinuation<Void, Error>?
     private var bufferedCallbackURL: URL?
     private var terminalError: Error?
+    private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
 
     var redirectURL: URL {
-        URL(string: "http://127.0.0.1:\(port)\(callbackPath)")!
+        URL(string: "http://\(Self.redirectHost):\(port)\(callbackPath)")!
     }
 
     init(callbackPath: String) throws {
@@ -1938,6 +2324,7 @@ private final class LoopbackOAuthRedirectServer {
     }
 
     private func handleConnection(_ connection: NWConnection) {
+        activeConnections[ObjectIdentifier(connection)] = connection
         connection.start(queue: queue)
         receiveNextChunk(on: connection, bufferedData: Data())
     }
@@ -1949,7 +2336,7 @@ private final class LoopbackOAuthRedirectServer {
             }
 
             if error != nil {
-                connection.cancel()
+                closeConnection(connection)
                 return
             }
 
@@ -1971,7 +2358,8 @@ private final class LoopbackOAuthRedirectServer {
                     body: Self.callbackHTML(
                         title: "Sign-in failed",
                         message: "Speechara received an incomplete OAuth callback.",
-                        kind: .failure
+                        kind: .failure,
+                        deepLinkURL: nil
                     )
                 )
                 return
@@ -1994,7 +2382,7 @@ private final class LoopbackOAuthRedirectServer {
         }
 
         let target = String(parts[1])
-        guard let requestURL = URL(string: "http://127.0.0.1:\(port)\(target)"),
+        guard let requestURL = URL(string: "http://\(Self.redirectHost):\(port)\(target)"),
               let components = URLComponents(url: requestURL, resolvingAgainstBaseURL: false),
               components.path == callbackPath else {
             sendInvalidRequest(on: connection)
@@ -2011,10 +2399,27 @@ private final class LoopbackOAuthRedirectServer {
                 body: Self.callbackHTML(
                     title: "Sign-in failed",
                     message: description,
-                    kind: .failure
+                    kind: .failure,
+                    deepLinkURL: nil
                 )
             )
             finishCallback(with: .failure(AuthServiceError.callbackReturnedError(description)))
+            return
+        }
+
+        guard let code = items["code"], !code.isEmpty,
+              let state = items["state"], !state.isEmpty else {
+            sendHTMLResponse(
+                on: connection,
+                statusCode: 400,
+                body: Self.callbackHTML(
+                    title: "Sign-in failed",
+                    message: "Speechara received an incomplete Microsoft sign-in callback. Return to the app and try again.",
+                    kind: .failure,
+                    deepLinkURL: nil
+                )
+            )
+            finishCallback(with: .failure(AuthServiceError.invalidCallback))
             return
         }
 
@@ -2022,9 +2427,10 @@ private final class LoopbackOAuthRedirectServer {
             on: connection,
             statusCode: 200,
             body: Self.callbackHTML(
-                title: "Signed in to Speechara",
-                message: "You may now close this page.",
-                kind: .success
+                title: "Sign-in complete",
+                message: "You can return to Speechara. This browser tab can be closed.",
+                kind: .success,
+                deepLinkURL: "speechara://auth/microsoft/complete"
             )
         )
         finishCallback(with: .success(requestURL))
@@ -2037,28 +2443,42 @@ private final class LoopbackOAuthRedirectServer {
             body: Self.callbackHTML(
                 title: "Sign-in failed",
                 message: "This callback URL is not recognized by Speechara.",
-                kind: .failure
+                kind: .failure,
+                deepLinkURL: nil
             )
         )
     }
 
     private func sendHTMLResponse(on connection: NWConnection, statusCode: Int, body: String) {
         let bodyData = Data(body.utf8)
-        let header = """
-        HTTP/1.1 \(statusCode) \(Self.reasonPhrase(for: statusCode))\r
-        Content-Type: text/html; charset=utf-8\r
-        Content-Length: \(bodyData.count)\r
-        Cache-Control: no-store\r
-        Connection: close\r
-        \r
-        """
+        let header = [
+            "HTTP/1.1 \(statusCode) \(Self.reasonPhrase(for: statusCode))",
+            "Content-Type: text/html; charset=utf-8",
+            "Content-Length: \(bodyData.count)",
+            "Cache-Control: no-store",
+            "Connection: close",
+            "",
+            "",
+        ].joined(separator: "\r\n")
 
         var responseData = Data(header.utf8)
         responseData.append(bodyData)
 
-        connection.send(content: responseData, completion: .contentProcessed { _ in
-            connection.cancel()
-        })
+        connection.send(
+            content: responseData,
+            contentContext: .defaultMessage,
+            isComplete: true,
+            completion: .contentProcessed { [weak self] _ in
+                self?.queue.asyncAfter(deadline: .now() + 0.25) {
+                    self?.closeConnection(connection)
+                }
+            }
+        )
+    }
+
+    private func closeConnection(_ connection: NWConnection) {
+        activeConnections.removeValue(forKey: ObjectIdentifier(connection))
+        connection.cancel()
     }
 
     private func finishCallback(with result: Result<URL, Error>) {
@@ -2124,9 +2544,15 @@ private final class LoopbackOAuthRedirectServer {
         }
     }
 
-    private static func callbackHTML(title: String, message: String, kind: CallbackPageKind) -> String {
+    private static func callbackHTML(
+        title: String,
+        message: String,
+        kind: CallbackPageKind,
+        deepLinkURL: String?
+    ) -> String {
         let safeTitle = htmlEscaped(title)
         let safeMessage = htmlEscaped(message)
+        let script = callbackScript(deepLinkURL: deepLinkURL)
 
         return """
         <!doctype html>
@@ -2134,7 +2560,7 @@ private final class LoopbackOAuthRedirectServer {
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1">
-          <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+          <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
           <title>\(safeTitle)</title>
           <style>
             :root { color-scheme: light; }
@@ -2192,6 +2618,22 @@ private final class LoopbackOAuthRedirectServer {
               font-size: 16px;
               line-height: 1.5;
             }
+            button {
+              margin-top: 24px;
+              border: 0;
+              border-radius: 8px;
+              background: #15181c;
+              color: white;
+              cursor: pointer;
+              font: inherit;
+              font-size: 15px;
+              font-weight: 600;
+              padding: 10px 16px;
+            }
+            button:focus-visible {
+              outline: 3px solid rgba(21,24,28,0.24);
+              outline-offset: 3px;
+            }
             body.failure {
               background:
                 radial-gradient(circle at top, rgba(255,255,255,0.94), rgba(251,242,240,0.97)),
@@ -2218,10 +2660,37 @@ private final class LoopbackOAuthRedirectServer {
             </div>
             <h1>\(safeTitle)</h1>
             <p>\(safeMessage)</p>
+            <button type="button" onclick="window.close()">Close tab</button>
           </main>
+          \(script)
         </body>
         </html>
         """
+    }
+
+    private static func callbackScript(deepLinkURL: String?) -> String {
+        let historyPath = javaScriptStringEscaped(callbackPathForHistory)
+        let deepLinkScript = deepLinkURL.map { url in
+            let escapedURL = javaScriptStringEscaped(url)
+            return """
+                  window.setTimeout(function () {
+                    window.location.href = "\(escapedURL)";
+                  }, 300);
+            """
+        } ?? ""
+
+        return """
+        <script>
+          try {
+            window.history.replaceState(null, "Speechara Sign In", "\(historyPath)");
+            \(deepLinkScript)
+          } catch (_) {}
+        </script>
+        """
+    }
+
+    private static var callbackPathForHistory: String {
+        "/oauth/microsoft/callback"
     }
 
     private static func iconMarkup(for kind: CallbackPageKind) -> String {
@@ -2254,6 +2723,16 @@ private final class LoopbackOAuthRedirectServer {
             .replacingOccurrences(of: "\"", with: "&quot;")
             .replacingOccurrences(of: "'", with: "&#39;")
     }
+
+    private static func javaScriptStringEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+            .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+    }
 }
 
 private extension Data {
@@ -2262,6 +2741,17 @@ private extension Data {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
+    }
+
+    init?(base64URLEncoded value: String) {
+        var base64 = value
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+
+        let paddingLength = (4 - base64.count % 4) % 4
+        base64.append(String(repeating: "=", count: paddingLength))
+
+        self.init(base64Encoded: base64)
     }
 }
 

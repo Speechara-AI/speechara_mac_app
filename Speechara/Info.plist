@@ -18,6 +18,17 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>ai.speechara.mac.auth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>speechara</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSApplicationCategoryType</key>
@@ -30,5 +41,9 @@
 	<string>Speechara captures system audio for live transcription and optional local recording.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Speechara needs microphone access for live transcription and optional local audio recording.</string>
+	<key>SpeecharaAuthBackendBaseURL</key>
+	<string>$(SPEECHARA_AUTH_BASE_URL)</string>
+	<key>SpeecharaMicrosoftClientID</key>
+	<string>18502933-8dc8-4eb9-a305-616f62a04dee</string>
 </dict>
 </plist>

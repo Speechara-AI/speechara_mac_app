@@ -20,6 +20,13 @@ USE_LAYOUT=1
 USE_BACKGROUND=1
 BUILD_UNSIGNED=0
 REVEAL_OUTPUT=0
+SKIP_NOTARIZATION=0
+SIGN_IDENTITY="${SIGN_IDENTITY:-}"
+ENTITLEMENTS_PATH="${ENTITLEMENTS_PATH:-${REPO_ROOT}/Speechara/Speechara.entitlements}"
+NOTARYTOOL_PROFILE="${NOTARYTOOL_PROFILE:-}"
+NOTARY_APPLE_ID="${NOTARY_APPLE_ID:-${APPLE_ID:-}}"
+NOTARY_TEAM_ID="${NOTARY_TEAM_ID:-${APPLE_TEAM_ID:-}}"
+NOTARY_PASSWORD="${NOTARY_PASSWORD:-${APPLE_PASSWORD:-}}"
 
 usage() {
   cat <<EOF
@@ -38,6 +45,13 @@ Options:
   --no-background    Skip the background image entirely.
   --no-layout        Skip Finder layout customization. Useful in headless CI.
   --reveal           Reveal the finished DMG in Finder without opening it.
+  --sign-identity ID Sign the .app with a Developer ID Application identity before notarization.
+  --entitlements PATH
+                    Entitlements to use when --sign-identity is provided.
+  --notary-profile NAME
+                    Keychain profile created by 'xcrun notarytool store-credentials'.
+  --skip-notarization
+                    Package without Developer ID/notarization checks. For local-only builds.
   -h, --help         Show this help message.
 EOF
 }
@@ -66,6 +80,106 @@ APPLESCRIPT
   open -R "${target_path}" >/dev/null 2>&1 || true
 }
 
+is_developer_id_signed() {
+  local app_path="$1"
+  local signature_info=""
+
+  signature_info="$(codesign -dv --verbose=4 "${app_path}" 2>&1)"
+  grep -q '^Authority=Developer ID Application:' <<< "${signature_info}"
+}
+
+has_stapled_ticket() {
+  local app_path="$1"
+
+  xcrun stapler validate "${app_path}" >/dev/null 2>&1
+}
+
+notarytool_auth_args() {
+  if [ -n "${NOTARYTOOL_PROFILE}" ]; then
+    printf '%s\n' "--keychain-profile" "${NOTARYTOOL_PROFILE}"
+    return 0
+  fi
+
+  if [ -n "${NOTARY_APPLE_ID}" ] && [ -n "${NOTARY_TEAM_ID}" ] && [ -n "${NOTARY_PASSWORD}" ]; then
+    printf '%s\n' "--apple-id" "${NOTARY_APPLE_ID}" "--team-id" "${NOTARY_TEAM_ID}" "--password" "${NOTARY_PASSWORD}"
+    return 0
+  fi
+
+  return 1
+}
+
+sign_app_for_notarization() {
+  local app_path="$1"
+
+  if [ ! -f "${ENTITLEMENTS_PATH}" ]; then
+    fail "Entitlements file not found at ${ENTITLEMENTS_PATH}"
+  fi
+
+  echo "Signing ${app_path} with ${SIGN_IDENTITY}"
+  codesign \
+    --force \
+    --deep \
+    --options runtime \
+    --timestamp \
+    --entitlements "${ENTITLEMENTS_PATH}" \
+    --sign "${SIGN_IDENTITY}" \
+    "${app_path}"
+}
+
+notarize_app() {
+  local app_path="$1"
+  local archive_path="${OUTPUT_DIR}/${PRODUCT_NAME}-notary.zip"
+  local auth_output=""
+  local auth_args=()
+
+  if ! auth_output="$(notarytool_auth_args)"; then
+    fail "No notarization credentials configured. Run 'xcrun notarytool store-credentials speechara-notary ...' and pass --notary-profile speechara-notary, or set NOTARY_APPLE_ID, NOTARY_TEAM_ID, and NOTARY_PASSWORD."
+  fi
+  while IFS= read -r auth_arg; do
+    auth_args+=("${auth_arg}")
+  done <<< "${auth_output}"
+
+  rm -f "${archive_path}"
+  echo "Creating notarization archive ${archive_path}"
+  ditto -c -k --keepParent "${app_path}" "${archive_path}"
+
+  echo "Submitting ${APP_BUNDLE_NAME} to Apple notarization service and waiting for completion"
+  xcrun notarytool submit "${archive_path}" --wait "${auth_args[@]}"
+
+  echo "Stapling notarization ticket to ${APP_BUNDLE_NAME}"
+  xcrun stapler staple "${app_path}"
+  rm -f "${archive_path}"
+}
+
+prepare_app_for_distribution() {
+  local app_path="$1"
+
+  if [ "${SKIP_NOTARIZATION}" -eq 1 ]; then
+    echo "Skipping Developer ID/notarization checks. DMG is for local-only use."
+    return 0
+  fi
+
+  if [ -n "${SIGN_IDENTITY}" ]; then
+    sign_app_for_notarization "${app_path}"
+  fi
+
+  if ! is_developer_id_signed "${app_path}"; then
+    codesign -dv --verbose=4 "${app_path}" 2>&1 | sed -n '1,40p' >&2 || true
+    fail "${APP_BUNDLE_NAME} must be signed with a Developer ID Application identity before DMG packaging. Provide --sign-identity or pass an already exported Developer ID .app. Use --skip-notarization only for local-only builds."
+  fi
+
+  codesign --verify --deep --strict --verbose=2 "${app_path}"
+
+  if ! has_stapled_ticket "${app_path}"; then
+    notarize_app "${app_path}"
+  else
+    echo "${APP_BUNDLE_NAME} already has a stapled notarization ticket."
+  fi
+
+  xcrun stapler validate "${app_path}"
+  spctl -a -vvv -t execute "${app_path}"
+}
+
 require_value() {
   if [ $# -lt 2 ] || [ -z "${2:-}" ]; then
     fail "Missing value for ${1}"
@@ -85,6 +199,7 @@ while [ $# -gt 0 ]; do
       ;;
     --unsigned)
       BUILD_UNSIGNED=1
+      SKIP_NOTARIZATION=1
       shift
       ;;
     --output-dir)
@@ -117,6 +232,25 @@ while [ $# -gt 0 ]; do
       ;;
     --reveal)
       REVEAL_OUTPUT=1
+      shift
+      ;;
+    --sign-identity)
+      require_value "$@"
+      SIGN_IDENTITY="$2"
+      shift 2
+      ;;
+    --entitlements)
+      require_value "$@"
+      ENTITLEMENTS_PATH="$2"
+      shift 2
+      ;;
+    --notary-profile)
+      require_value "$@"
+      NOTARYTOOL_PROFILE="$2"
+      shift 2
+      ;;
+    --skip-notarization)
+      SKIP_NOTARIZATION=1
       shift
       ;;
     -h|--help)
@@ -175,6 +309,7 @@ if [ -z "${APP_PATH}" ]; then
 
   if [ "${BUILD_UNSIGNED}" -eq 1 ]; then
     XCODEBUILD_ARGS+=(CODE_SIGNING_ALLOWED=NO)
+    SKIP_NOTARIZATION=1
   fi
 
   XCODEBUILD_ARGS+=(build)
@@ -192,11 +327,20 @@ if [ "${APP_BUNDLE_NAME##*.}" != "app" ]; then
   fail "Expected an .app bundle, got ${APP_BUNDLE_NAME}"
 fi
 
+prepare_app_for_distribution "${APP_PATH}"
+
 APP_SIZE_KB="$(du -sk "${APP_PATH}" | awk '{print $1}')"
 DMG_SIZE_MB="$(((APP_SIZE_KB + 1023) / 1024 + 80))"
 
 if [ "${DMG_SIZE_MB}" -lt 180 ]; then
   DMG_SIZE_MB=180
+fi
+
+EXISTING_VOLUME_PATH="/Volumes/${VOLUME_NAME}"
+
+if mount | grep -F " on ${EXISTING_VOLUME_PATH} " >/dev/null 2>&1; then
+  echo "Detaching existing ${EXISTING_VOLUME_PATH} to avoid Finder layout collisions." >&2
+  hdiutil detach "${EXISTING_VOLUME_PATH}" -quiet >/dev/null 2>&1 || hdiutil detach "${EXISTING_VOLUME_PATH}" -force -quiet >/dev/null 2>&1 || true
 fi
 
 rm -rf "${STAGING_DIR}" "${MOUNT_ROOT}"
@@ -285,12 +429,11 @@ sync
 hdiutil detach "${DEVICE}" -quiet >/dev/null
 DEVICE=""
 
-hdiutil create \
-  -volname "${VOLUME_NAME}" \
-  -srcfolder "${STAGING_DIR}" \
-  -fs HFS+ \
+hdiutil convert \
+  "${TEMP_DMG_PATH}" \
   -format UDZO \
   -imagekey zlib-level=9 \
+  -o \
   "${FINAL_DMG_PATH}" >/dev/null
 
 if [ "${REVEAL_OUTPUT}" -eq 1 ]; then

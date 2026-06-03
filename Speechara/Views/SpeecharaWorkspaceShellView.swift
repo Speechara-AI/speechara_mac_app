@@ -103,7 +103,9 @@ private enum SpeecharaShellTheme {
 }
 
 struct SpeecharaWorkspaceShellView: View {
+    @Environment(\.openWindow) private var openWindow
     @EnvironmentObject private var authStore: AuthSessionStore
+    @ObservedObject private var updateController = SpeecharaUpdateController.shared
     @AppStorage("speechara.focusModeEnabled") private var isFocusModeEnabled = false
     @State private var selectedSection: SpeecharaAppSection = .workspace
 
@@ -166,6 +168,14 @@ struct SpeecharaWorkspaceShellView: View {
                     ) {
                         selectedSection = section
                     }
+                }
+
+                SpeecharaSidebarButton(
+                    title: SL("Settings"),
+                    systemImage: "gearshape",
+                    isSelected: false
+                ) {
+                    openSettingsWindow()
                 }
             }
 
@@ -232,6 +242,11 @@ struct SpeecharaWorkspaceShellView: View {
             SpeecharaHistoryView()
         }
     }
+
+    private func openSettingsWindow() {
+        openWindow(id: "speechara-settings")
+        NSApp.activate(ignoringOtherApps: true)
+    }
 }
 
 private struct SpeecharaSidebarButton: View {
@@ -284,6 +299,37 @@ private struct SpeecharaSidebarButton: View {
             .padding(.vertical, 12)
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct SpeecharaSidebarUpdateButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.system(size: 13, weight: .bold))
+
+                Text(SL("Update"))
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 34)
+            .background(
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .fill(Color(red: 0.10, green: 0.42, blue: 0.84))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .stroke(Color.white.opacity(0.22), lineWidth: 1)
+            )
+            .shadow(color: Color(red: 0.10, green: 0.42, blue: 0.84).opacity(0.22), radius: 10, x: 0, y: 5)
+        }
+        .buttonStyle(.plain)
+        .help(SL("Install available update"))
     }
 }
 

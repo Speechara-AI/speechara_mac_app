@@ -363,10 +363,17 @@ final class SpeecharaHistoryViewModel: ObservableObject {
         detailSummaryText?.nilIfEmpty ?? detail.summaryText?.nilIfEmpty
     }
 
+    func canSummarize(_ detail: MeetingSessionHistoryDetail) -> Bool {
+        detail.copyableTranscriptText != nil
+            && !isSummaryLoading
+            && visibleSummaryText(for: detail) == nil
+    }
+
     func summarizeSelectedTranscript() {
         guard !isSummaryLoading,
               let detail = selectedSessionDetail,
-              let transcriptText = detail.copyableTranscriptText else {
+              let transcriptText = detail.copyableTranscriptText,
+              visibleSummaryText(for: detail) == nil else {
             return
         }
 
@@ -810,7 +817,7 @@ private struct SpeecharaHistoryDetailSheet: View {
                     SpeecharaHistoryPanelActionButton(
                         title: "Summarize",
                         systemImage: "sparkles",
-                        isEnabled: detail.copyableTranscriptText != nil && !viewModel.isSummaryLoading,
+                        isEnabled: viewModel.canSummarize(detail),
                         isLoading: viewModel.isSummaryLoading,
                         action: viewModel.summarizeSelectedTranscript
                     )
@@ -849,7 +856,7 @@ private struct SpeecharaHistoryDetailSheet: View {
                 SpeecharaHistoryPanelActionButton(
                     title: "Summarize",
                     systemImage: "sparkles",
-                    isEnabled: detail.copyableTranscriptText != nil && !viewModel.isSummaryLoading,
+                    isEnabled: viewModel.canSummarize(detail),
                     isLoading: viewModel.isSummaryLoading,
                     action: viewModel.summarizeSelectedTranscript
                 )

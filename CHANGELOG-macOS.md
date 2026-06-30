@@ -1,5 +1,19 @@
 # Speechara macOS Version History
 
+## 1.0.11 - 2026-06-03
+
+### Fixed
+- Restored Sparkle in the macOS release target after the emergency 1.0.10 launch fix.
+- Restored signed Sparkle appcast generation for future in-app updates.
+- Added the Sparkle feed URL and public EdDSA key back to the macOS app bundle.
+
+## 1.0.10 - 2026-06-03
+
+### Fixed
+- Fixed a macOS launch failure after updating to 1.0.9.
+- Removed a restricted Apple Sign In entitlement from the Developer ID build until a matching distribution provisioning profile is configured.
+- Removed the embedded Xcode development provisioning profile from Developer ID release packages.
+
 ## 1.0.9 - 2026-06-03
 
 ### Added

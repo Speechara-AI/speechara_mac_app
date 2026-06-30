@@ -165,6 +165,7 @@ actor DeepgramLiveTranscriptionService {
     private var eventHandler: (@Sendable (DeepgramTranscriptEvent) -> Void)?
     private var errorHandler: (@Sendable (String) -> Void)?
     private var isStopping = false
+    private var didReportStreamingError = false
 
     init(
         session: URLSession? = nil,
@@ -218,6 +219,7 @@ actor DeepgramLiveTranscriptionService {
         self.eventHandler = eventHandler
         self.errorHandler = errorHandler
         self.isStopping = false
+        self.didReportStreamingError = false
 
         let webSocketTask = session.webSocketTask(with: request)
         webSocketOpenObserver?.prepare(for: webSocketTask.taskIdentifier)
@@ -237,7 +239,7 @@ actor DeepgramLiveTranscriptionService {
     }
 
     func sendAudio(_ audioData: Data) {
-        guard !audioData.isEmpty, !isStopping, let webSocketTask else {
+        guard !audioData.isEmpty, !isStopping, !didReportStreamingError, let webSocketTask else {
             return
         }
 
@@ -377,18 +379,26 @@ actor DeepgramLiveTranscriptionService {
     }
 
     private func handleStreamingError(_ error: Error) {
-        guard !isStopping else {
+        guard !isStopping, !didReportStreamingError else {
             return
         }
 
-        errorHandler?(error.localizedDescription)
+        didReportStreamingError = true
+        let errorMessage = error.localizedDescription
+        let errorHandler = errorHandler
+        cleanup(cancelWebSocket: true)
+        errorHandler?(errorMessage)
     }
 
-    private func cleanup() {
+    private func cleanup(cancelWebSocket: Bool = false) {
         receiveTask?.cancel()
         keepAliveTask?.cancel()
+        if cancelWebSocket {
+            webSocketTask?.cancel(with: .goingAway, reason: nil)
+        }
         receiveTask = nil
         keepAliveTask = nil
+        sendChain = nil
         webSocketTask = nil
         eventHandler = nil
         errorHandler = nil

@@ -19,7 +19,6 @@ struct SpeecharaProfileView: View {
                 footerActions
             }
             .padding(32)
-            .frame(maxWidth: 860, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollIndicators(.hidden)
@@ -34,7 +33,7 @@ struct SpeecharaProfileView: View {
                 .font(.system(size: 42, weight: .bold, design: .rounded))
                 .foregroundStyle(SpeecharaProfileTheme.primaryText)
 
-            Text("This page loads account data from `/v1/auth/me` and billing data from `/api/billing/summary`.")
+            Text("Manage your Speechara account, plan, and usage.")
                 .font(.system(size: 18, weight: .medium, design: .rounded))
                 .foregroundStyle(SpeecharaProfileTheme.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
@@ -69,7 +68,7 @@ struct SpeecharaProfileView: View {
     private var accountSection: some View {
         SpeecharaProfileSectionCard(
             title: "Account",
-            subtitle: "These fields come from the auth profile endpoint."
+            subtitle: "Your signed-in Speechara profile."
         ) {
             if let user = authStore.currentUser {
                 VStack(spacing: 16) {

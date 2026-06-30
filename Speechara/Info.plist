@@ -45,5 +45,9 @@
 	<string>$(SPEECHARA_AUTH_BASE_URL)</string>
 	<key>SpeecharaMicrosoftClientID</key>
 	<string>18502933-8dc8-4eb9-a305-616f62a04dee</string>
+	<key>SUFeedURL</key>
+	<string>https://updates.speechara.ai/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>+er2tmbbGKAStULAg+A/243msSxKOj1iYOA35HecFho=</string>
 </dict>
 </plist>

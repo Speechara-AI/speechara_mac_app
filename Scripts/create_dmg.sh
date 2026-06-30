@@ -110,9 +110,15 @@ notarytool_auth_args() {
 
 sign_app_for_notarization() {
   local app_path="$1"
+  local embedded_profile_path="${app_path}/Contents/embedded.provisionprofile"
 
   if [ ! -f "${ENTITLEMENTS_PATH}" ]; then
     fail "Entitlements file not found at ${ENTITLEMENTS_PATH}"
+  fi
+
+  if [ -f "${embedded_profile_path}" ]; then
+    echo "Removing embedded provisioning profile before Developer ID signing"
+    rm -f "${embedded_profile_path}"
   fi
 
   echo "Signing ${app_path} with ${SIGN_IDENTITY}"

@@ -387,6 +387,7 @@ final class SubtitleViewModel: ObservableObject {
     private var billingUsageEventSequence = 1
     private var billingUsageSyncTask: Task<Void, Never>?
     private var isReconcilingTranslationSelection = false
+    private var isHandlingLiveTranscriptionRuntimeError = false
 
     private static let transcriptTimestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -1828,7 +1829,7 @@ final class SubtitleViewModel: ObservableObject {
                 },
                 errorHandler: { [weak self] errorMessage in
                     Task { @MainActor in
-                        self?.errorMessage = "Live transcription was interrupted: \(errorMessage)"
+                        self?.handleLiveTranscriptionRuntimeError(errorMessage)
                     }
                 }
             )
@@ -1874,6 +1875,23 @@ final class SubtitleViewModel: ObservableObject {
         microphoneLevel = 0
         microphoneSignalDetected = false
         updateMicrophoneLiveHandler()
+    }
+
+    private func handleLiveTranscriptionRuntimeError(_ message: String) {
+        let interruptionMessage = "Live transcription was interrupted: \(message)"
+        errorMessage = interruptionMessage
+
+        guard isStreamingSessionPrepared, !isHandlingLiveTranscriptionRuntimeError else {
+            return
+        }
+
+        isHandlingLiveTranscriptionRuntimeError = true
+
+        Task { @MainActor in
+            await stopStreamingSession(markStopped: true)
+            errorMessage = interruptionMessage
+            isHandlingLiveTranscriptionRuntimeError = false
+        }
     }
 
     private func stopSystemAudioListening(markStopped: Bool) async {
@@ -2057,14 +2075,14 @@ final class SubtitleViewModel: ObservableObject {
                 guard useDialogueLabels, let speakerNumber = entry.speakerNumber else {
                     content = entry.text
                     if includeTimestamps {
-                        return "[\(Self.transcriptTimestampFormatter.string(from: entry.timestamp))]\n\(content)"
+                        return "[\(Self.transcriptTimestampFormatter.string(from: entry.timestamp))] \(content)"
                     }
                     return content
                 }
 
                 content = "\(speakerLabel(for: speakerNumber)): \(entry.text)"
                 if includeTimestamps {
-                    return "[\(Self.transcriptTimestampFormatter.string(from: entry.timestamp))]\n\(content)"
+                    return "[\(Self.transcriptTimestampFormatter.string(from: entry.timestamp))] \(content)"
                 }
                 return content
             }

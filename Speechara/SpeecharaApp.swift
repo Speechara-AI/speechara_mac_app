@@ -70,7 +70,7 @@ struct SpeecharaApp: App {
                 .preferredColorScheme(appearanceMode.preferredColorScheme)
                 .id(localizationStore.language.rawValue)
         }
-        .windowResizability(.contentSize)
+        .windowResizability(.contentMinSize)
 
         MenuBarExtra {
             SpeecharaMenuBarMenu()
@@ -113,7 +113,7 @@ private struct SpeecharaBackgroundCoordinatorView: View {
         Task { @MainActor in
             do {
                 try await authStore.ensureActiveSession()
-                viewModel.promptAndStartListening(includeMicrophone: viewModel.startsWithMicrophoneEnabled)
+                viewModel.startListening(mode: .newSession, includeMicrophone: viewModel.startsWithMicrophoneEnabled)
                 openWindow(id: "speechara-listening-mini")
                 NSApp.activate(ignoringOtherApps: true)
             } catch {
@@ -187,7 +187,7 @@ private struct SpeecharaMenuBarLabel: View {
         Task { @MainActor in
             do {
                 try await authStore.ensureActiveSession()
-                viewModel.promptAndStartListening(includeMicrophone: viewModel.startsWithMicrophoneEnabled)
+                viewModel.startListening(mode: .newSession, includeMicrophone: viewModel.startsWithMicrophoneEnabled)
                 openWindow(id: "speechara-listening-mini")
                 NSApp.activate(ignoringOtherApps: true)
             } catch {
@@ -340,7 +340,39 @@ private struct SpeecharaListeningMiniView: View {
             }
         }
         .padding(18)
-        .frame(width: 520, height: 220)
+        .frame(minWidth: 360, idealWidth: 520, maxWidth: .infinity, minHeight: 176, idealHeight: 220, maxHeight: .infinity)
+        .background(SpeecharaFloatingMiniWindowConfigurator())
+    }
+}
+
+private struct SpeecharaFloatingMiniWindowConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        configureWindow(for: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        configureWindow(for: nsView)
+    }
+
+    private func configureWindow(for view: NSView) {
+        DispatchQueue.main.async {
+            guard let window = view.window else {
+                return
+            }
+
+            window.level = .floating
+            window.collectionBehavior.insert(.canJoinAllSpaces)
+            window.collectionBehavior.insert(.fullScreenAuxiliary)
+            window.hidesOnDeactivate = false
+            window.isMovableByWindowBackground = true
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.styleMask.insert(.resizable)
+            window.minSize = NSSize(width: 360, height: 176)
+            window.maxSize = NSSize(width: 720, height: 420)
+        }
     }
 }
 
@@ -993,7 +1025,7 @@ private final class MeetingDetectionStore: ObservableObject {
         if let startListeningHandler {
             startListeningHandler()
         } else if let viewModel {
-            viewModel.promptAndStartListening(includeMicrophone: viewModel.startsWithMicrophoneEnabled)
+            viewModel.startListening(mode: .newSession, includeMicrophone: viewModel.startsWithMicrophoneEnabled)
         }
 
         if let meeting, meeting.detectionSource == .windowSignal {

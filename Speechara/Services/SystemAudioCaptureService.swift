@@ -90,8 +90,13 @@ final class SystemAudioCaptureService: @unchecked Sendable {
         }
     }
 
-    @MainActor
     func startCapture(recordAudio: Bool) async throws {
+        try await Task.detached(priority: .userInitiated) { [self] in
+            try startCaptureSynchronously(recordAudio: recordAudio)
+        }.value
+    }
+
+    private func startCaptureSynchronously(recordAudio: Bool) throws {
         _ = recordAudio
 
         guard tapID == kAudioObjectUnknown, aggregateDeviceID == kAudioObjectUnknown else {
@@ -171,18 +176,19 @@ final class SystemAudioCaptureService: @unchecked Sendable {
                 throw SystemAudioCaptureError.failedToStartDevice(status)
             }
         } catch {
-            try? await stopCaptureIfNeeded()
+            try? stopCaptureIfNeeded()
             throw error
         }
     }
 
-    @MainActor
     func stopCapture() async throws -> URL? {
-        guard tapID != kAudioObjectUnknown || aggregateDeviceID != kAudioObjectUnknown else {
-            throw SystemAudioCaptureError.notCapturing
-        }
+        try await Task.detached(priority: .userInitiated) { [self] in
+            guard tapID != kAudioObjectUnknown || aggregateDeviceID != kAudioObjectUnknown else {
+                throw SystemAudioCaptureError.notCapturing
+            }
 
-        try await stopCaptureIfNeeded()
+            try stopCaptureIfNeeded()
+        }.value
         return nil
     }
 
@@ -242,8 +248,7 @@ final class SystemAudioCaptureService: @unchecked Sendable {
         }
     }
 
-    @MainActor
-    private func stopCaptureIfNeeded() async throws {
+    private func stopCaptureIfNeeded() throws {
         var stopError: Error?
 
         processingQueue.sync {

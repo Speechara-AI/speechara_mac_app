@@ -90,7 +90,6 @@ struct SpeecharaHistoryView: View {
                 content
             }
             .padding(32)
-            .frame(maxWidth: 980, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollIndicators(.hidden)
@@ -109,7 +108,7 @@ struct SpeecharaHistoryView: View {
                     .font(.system(size: 42, weight: .bold, design: .rounded))
                     .foregroundStyle(SpeecharaHistoryTheme.primaryText)
 
-                Text("This page loads saved meeting sessions from the backend and shows a compact overview. Open any card to inspect the full transcript, translation, summary, protocol, and suggested reply.")
+                Text("Review your saved meetings, transcripts, translations, summaries, and follow-up notes.")
                     .font(.system(size: 18, weight: .medium, design: .rounded))
                     .foregroundStyle(SpeecharaHistoryTheme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -174,7 +173,7 @@ struct SpeecharaHistoryView: View {
         } else if viewModel.sessions.isEmpty {
             SpeecharaHistoryEmptyCard(
                 title: "No history yet",
-                subtitle: "Saved meeting sessions will appear here as soon as they are available in the backend."
+                subtitle: "Your saved meetings will appear here after you finish a session."
             )
         } else {
             LazyVStack(spacing: 16) {

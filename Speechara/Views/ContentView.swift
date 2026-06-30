@@ -583,7 +583,7 @@ struct ContentView: View {
         Task { @MainActor in
             do {
                 try await authStore.ensureActiveSession()
-                viewModel.promptAndStartListening(includeMicrophone: viewModel.startsWithMicrophoneEnabled)
+                viewModel.startListening(mode: .newSession, includeMicrophone: viewModel.startsWithMicrophoneEnabled)
             } catch {
                 viewModel.showErrorMessage(authStore.errorMessage ?? error.localizedDescription)
             }

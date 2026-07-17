@@ -1,11 +1,13 @@
 import AppKit
+import Combine
 import CoreAudio
 import CoreGraphics
 import OSLog
 import SwiftUI
 
-private extension Notification.Name {
+extension Notification.Name {
     static let speecharaOpenMainWindow = Notification.Name("speechara.openMainWindow")
+    static let speecharaInterfaceLanguageWillChange = Notification.Name("speechara.interfaceLanguageWillChange")
 }
 
 @main
@@ -86,6 +88,11 @@ struct SpeecharaApp: App {
                 viewModel: subtitleViewModel,
                 meetingDetectionStore: meetingDetectionStore
             )
+            // The MenuBarExtra label has its own SwiftUI hierarchy. Its action
+            // handlers also need the session store used by the popup content.
+            .environmentObject(authStore)
+            .environmentObject(subtitleViewModel)
+            .environmentObject(meetingDetectionStore)
         }
         .menuBarExtraStyle(.menu)
     }
@@ -96,6 +103,9 @@ private struct SpeecharaBackgroundCoordinatorView: View {
     @EnvironmentObject private var authStore: AuthSessionStore
     @EnvironmentObject private var viewModel: SubtitleViewModel
     @EnvironmentObject private var meetingDetectionStore: MeetingDetectionStore
+    @AppStorage("speechara.isMiniWindowEnabled") private var isMiniWindowEnabled = true
+    @State private var suppressMiniWindowUntil = Date.distantPast
+    private let miniWindowVisibilityTimer = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
 
     var body: some View {
         Color.clear
@@ -107,20 +117,67 @@ private struct SpeecharaBackgroundCoordinatorView: View {
                     }
                 )
             }
+            .onReceive(NotificationCenter.default.publisher(for: .speecharaInterfaceLanguageWillChange)) { _ in
+                suppressMiniWindowUntil = Date().addingTimeInterval(1.5)
+                SpeecharaMiniWindowCoordinator.closeMiniWindow()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    synchronizeMiniWindowVisibility()
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                synchronizeMiniWindowVisibility()
+            }
+            .onReceive(miniWindowVisibilityTimer) { _ in
+                synchronizeMiniWindowVisibility()
+            }
+            .onChange(of: viewModel.hasActiveSession) { _ in
+                synchronizeMiniWindowVisibility()
+            }
     }
 
     private func startListeningAfterAuthRefresh() {
         Task { @MainActor in
             do {
                 try await authStore.ensureActiveSession()
-                viewModel.startListening(mode: .newSession, includeMicrophone: viewModel.startsWithMicrophoneEnabled)
-                openWindow(id: "speechara-listening-mini")
+                viewModel.promptAndStartListening(includeMicrophone: viewModel.startsWithMicrophoneEnabled)
+                openWindow(id: "speechara-main")
                 NSApp.activate(ignoringOtherApps: true)
             } catch {
                 viewModel.showErrorMessage(authStore.errorMessage ?? error.localizedDescription)
                 openWindow(id: "speechara-main")
                 NSApp.activate(ignoringOtherApps: true)
             }
+        }
+    }
+
+    private func synchronizeMiniWindowVisibility() {
+        guard isMiniWindowEnabled,
+              viewModel.hasActiveSession,
+              Date() >= suppressMiniWindowUntil,
+              SpeecharaMiniWindowCoordinator.shouldPresentMiniWindow() else {
+            SpeecharaMiniWindowCoordinator.closeMiniWindow()
+            return
+        }
+
+        SpeecharaMiniWindowCoordinator.hideMainWindowIfNeeded()
+
+        guard !SpeecharaMiniWindowCoordinator.isMiniWindowVisible else {
+            SpeecharaMiniWindowCoordinator.presentMiniWindowOverOtherApps()
+            return
+        }
+
+        openWindow(id: "speechara-listening-mini")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            guard isMiniWindowEnabled,
+                  viewModel.hasActiveSession,
+                  SpeecharaMiniWindowCoordinator.shouldPresentMiniWindow() else {
+                SpeecharaMiniWindowCoordinator.closeMiniWindow()
+                return
+            }
+
+            SpeecharaMiniWindowCoordinator.presentMiniWindowOverOtherApps()
         }
     }
 }
@@ -187,8 +244,8 @@ private struct SpeecharaMenuBarLabel: View {
         Task { @MainActor in
             do {
                 try await authStore.ensureActiveSession()
-                viewModel.startListening(mode: .newSession, includeMicrophone: viewModel.startsWithMicrophoneEnabled)
-                openWindow(id: "speechara-listening-mini")
+                viewModel.promptAndStartListening(includeMicrophone: viewModel.startsWithMicrophoneEnabled)
+                openWindow(id: "speechara-main")
                 NSApp.activate(ignoringOtherApps: true)
             } catch {
                 viewModel.showErrorMessage(authStore.errorMessage ?? error.localizedDescription)
@@ -246,13 +303,18 @@ private struct SpeecharaListeningMiniView: View {
         return SL("Ready to listen")
     }
 
-    private var previewText: String {
+    private var transcriptViewerText: String {
         let livePreview = viewModel.liveSubtitlePreview.trimmingCharacters(in: .whitespacesAndNewlines)
+        let transcript = viewModel.subtitlesText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !transcript.isEmpty, !livePreview.isEmpty {
+            return "\(transcript)\n\(livePreview)"
+        }
+
         if !livePreview.isEmpty {
             return livePreview
         }
 
-        let transcript = viewModel.subtitlesText.trimmingCharacters(in: .whitespacesAndNewlines)
         if !transcript.isEmpty {
             return transcript
         }
@@ -260,31 +322,36 @@ private struct SpeecharaListeningMiniView: View {
         return SL("Waiting for speech...")
     }
 
+    private var translationViewerText: String {
+        let livePreview = viewModel.liveTranslationPreview.trimmingCharacters(in: .whitespacesAndNewlines)
+        let translation = viewModel.translatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !translation.isEmpty {
+            return translation
+        }
+
+        if !livePreview.isEmpty {
+            return livePreview
+        }
+
+        return viewModel.translationPlaceholderText
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
-                ZStack(alignment: .topTrailing) {
-                    Image("SpeecharaMenuBarIcon")
-                        .renderingMode(.template)
-                        .resizable()
-                        .scaledToFit()
-                        .foregroundStyle(.primary)
-                        .frame(width: 30, height: 30)
-
-                    if viewModel.hasActiveSession {
-                        Circle()
-                            .fill(Color(red: 0.92, green: 0.05, blue: 0.08))
-                            .frame(width: 10, height: 10)
-                            .offset(x: 2, y: -1)
-                    }
-                }
-
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(statusTitle)
-                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                    HStack(spacing: 7) {
+                        Circle()
+                            .fill(viewModel.hasActiveSession ? Color(red: 0.92, green: 0.05, blue: 0.08) : .secondary)
+                            .frame(width: 8, height: 8)
+
+                        Text(statusTitle)
+                            .font(.system(size: 15, weight: .bold, design: .rounded))
+                    }
 
                     Text(viewModel.selectedMicrophoneName)
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
@@ -299,21 +366,32 @@ private struct SpeecharaListeningMiniView: View {
                 .disabled(!viewModel.hasActiveSession || viewModel.isBusy || viewModel.isMicrophoneBusy)
             }
 
-            Text(previewText)
-                .font(.system(size: 14, weight: .medium, design: .rounded))
-                .foregroundStyle(.secondary)
-                .lineLimit(3)
-                .frame(maxWidth: .infinity, minHeight: 58, alignment: .topLeading)
-                .padding(12)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.secondary.opacity(0.08))
+            if viewModel.isTranslationEnabled {
+                HStack(spacing: 12) {
+                    SpeecharaMiniTranscriptPanel(
+                        title: SL("Live transcript"),
+                        text: transcriptViewerText
+                    )
+
+                    SpeecharaMiniTranscriptPanel(
+                        title: viewModel.translationPanelTitle,
+                        text: translationViewerText
+                    )
+                }
+                .layoutPriority(1)
+            } else {
+                SpeecharaMiniTranscriptPanel(
+                    title: SL("Live transcript"),
+                    text: transcriptViewerText
                 )
+                .layoutPriority(1)
+            }
 
             HStack(spacing: 10) {
-                Button(SL("Open Speechara")) {
+                Button(SL("Expand Speechara")) {
                     openWindow(id: "speechara-main")
                     NSApp.activate(ignoringOtherApps: true)
+                    SpeecharaMiniWindowCoordinator.closeMiniWindow()
                 }
 
                 Spacer()
@@ -340,8 +418,61 @@ private struct SpeecharaListeningMiniView: View {
             }
         }
         .padding(18)
-        .frame(minWidth: 360, idealWidth: 520, maxWidth: .infinity, minHeight: 176, idealHeight: 220, maxHeight: .infinity)
+        .frame(minWidth: 420, idealWidth: 720, maxWidth: .infinity, minHeight: 300, idealHeight: 420, maxHeight: .infinity)
         .background(SpeecharaFloatingMiniWindowConfigurator())
+    }
+}
+
+private struct SpeecharaMiniTranscriptPanel: View {
+    let title: String
+    let text: String
+    private let bottomAnchor = "mini-transcript-bottom-anchor"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(text)
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .textSelection(.enabled)
+                        .padding(12)
+                        .padding(.bottom, 8)
+
+                    Color.clear
+                        .frame(height: 1)
+                        .id(bottomAnchor)
+                }
+                .onAppear {
+                    scrollToBottom(using: proxy)
+                }
+                .onChange(of: text) { _ in
+                    scrollToBottom(using: proxy)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.secondary.opacity(0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.secondary.opacity(0.10), lineWidth: 1)
+            )
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func scrollToBottom(using proxy: ScrollViewProxy) {
+        DispatchQueue.main.async {
+            proxy.scrollTo(bottomAnchor, anchor: .bottom)
+        }
     }
 }
 
@@ -370,10 +501,226 @@ private struct SpeecharaFloatingMiniWindowConfigurator: NSViewRepresentable {
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
             window.styleMask.insert(.resizable)
-            window.minSize = NSSize(width: 360, height: 176)
-            window.maxSize = NSSize(width: 720, height: 420)
+            window.minSize = NSSize(width: 420, height: 300)
+            window.maxSize = NSSize(width: 960, height: 680)
+            window.identifier = NSUserInterfaceItemIdentifier("speechara-listening-mini")
+            window.orderFrontRegardless()
         }
     }
+}
+
+@MainActor
+enum SpeecharaMiniWindowCoordinator {
+    private static let mainWindowTitle = "Speechara"
+    private static let miniWindowIdentifier = NSUserInterfaceItemIdentifier("speechara-listening-mini")
+    private static let coveredSampleColumns = 12
+    private static let coveredSampleRows = 8
+    private static let coveredSampleThreshold = 0.94
+    private static weak var mainWindowHiddenForMiniWindow: NSWindow?
+    private static var hiddenMainWindowBounds: CGRect?
+    private static var coveringApplicationPID: pid_t?
+
+    static func shouldPresentMiniWindow() -> Bool {
+        guard let mainWindow = NSApp.windows.first(where: { $0.title == mainWindowTitle }) else {
+            return true
+        }
+
+        if mainWindowHiddenForMiniWindow === mainWindow {
+            return isHiddenMainWindowStillCovered()
+        }
+
+        guard mainWindow.isVisible, !mainWindow.isMiniaturized else {
+            return true
+        }
+
+        // AppKit is a useful fast path, but it can report this app as visible
+        // when several foreign windows together cover it. Confirm with the
+        // actual WindowServer stacking order in that case.
+        return !mainWindow.occlusionState.contains(.visible)
+            || isMainWindowFullyCoveredByOtherApps(mainWindow)
+    }
+
+    static func hideMainWindowIfNeeded() {
+        guard mainWindowHiddenForMiniWindow == nil,
+              let mainWindow = NSApp.windows.first(where: { $0.title == mainWindowTitle }),
+              mainWindow.isVisible,
+              !mainWindow.isMiniaturized,
+              let windowInfo = onScreenWindowInfo(),
+              let mainInfo = windowInfo.first(where: {
+                  integerValue($0[kCGWindowNumber as String]) == mainWindow.windowNumber
+              }),
+              let bounds = windowBounds(from: mainInfo[kCGWindowBounds as String]) else {
+            // When Webex is in a separate full-screen Space, the main window is
+            // already absent from that Space and must remain attached to its own one.
+            return
+        }
+
+        hiddenMainWindowBounds = bounds
+        coveringApplicationPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        mainWindowHiddenForMiniWindow = mainWindow
+        mainWindow.orderOut(nil)
+    }
+
+    static func presentMiniWindowOverOtherApps() {
+        for window in NSApp.windows {
+            if isMiniWindow(window) {
+                window.level = .floating
+                window.collectionBehavior.insert(.canJoinAllSpaces)
+                window.collectionBehavior.insert(.fullScreenAuxiliary)
+                window.hidesOnDeactivate = false
+                window.orderFrontRegardless()
+            }
+        }
+    }
+
+    static var isMiniWindowVisible: Bool {
+        NSApp.windows.contains { isMiniWindow($0) && $0.isVisible }
+    }
+
+    static func closeMiniWindow() {
+        NSApp.windows
+            .filter(isMiniWindow)
+            .forEach { $0.close() }
+        restoreMainWindowIfNeeded()
+    }
+
+    private static func isMiniWindow(_ window: NSWindow) -> Bool {
+        window.identifier == miniWindowIdentifier || window.title == SL("Listening")
+    }
+
+    private static func isMainWindowFullyCoveredByOtherApps(_ mainWindow: NSWindow) -> Bool {
+        guard let windowInfo = onScreenWindowInfo() else {
+            return false
+        }
+
+        // Full-screen meeting apps such as Webex live in their own macOS Space.
+        // In that state the still-visible AppKit window is absent from WindowServer's
+        // on-screen list, which means it is completely unavailable to the user.
+        guard let mainIndex = windowInfo.firstIndex(where: {
+            integerValue($0[kCGWindowNumber as String]) == mainWindow.windowNumber
+        }) else {
+            return true
+        }
+
+        guard
+              let mainBounds = windowBounds(from: windowInfo[mainIndex][kCGWindowBounds as String]),
+              mainBounds.width > 0,
+              mainBounds.height > 0 else {
+            return false
+        }
+
+        let coveringBounds = windowInfo[..<mainIndex].compactMap { info -> CGRect? in
+            guard integerValue(info[kCGWindowLayer as String]) == 0,
+                  let ownerPID = integerValue(info[kCGWindowOwnerPID as String]),
+                  ownerPID != ProcessInfo.processInfo.processIdentifier,
+                  (numberValue(info[kCGWindowAlpha as String]) ?? 1) > 0.05,
+                  let bounds = windowBounds(from: info[kCGWindowBounds as String]),
+                  bounds.intersects(mainBounds) else {
+                return nil
+            }
+            return bounds
+        }
+
+        guard !coveringBounds.isEmpty else {
+            return false
+        }
+
+        return isCovered(mainBounds, by: coveringBounds)
+    }
+
+    private static func isHiddenMainWindowStillCovered() -> Bool {
+        guard let mainBounds = hiddenMainWindowBounds,
+              let windowInfo = onScreenWindowInfo() else {
+            return false
+        }
+
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let coveringPID = frontmostPID != ownPID ? frontmostPID : coveringApplicationPID
+
+        guard let coveringPID else {
+            return false
+        }
+
+        let coveringBounds = windowInfo.compactMap { info -> CGRect? in
+            guard integerValue(info[kCGWindowLayer as String]) == 0,
+                  integerValue(info[kCGWindowOwnerPID as String]) == Int(coveringPID),
+                  (numberValue(info[kCGWindowAlpha as String]) ?? 1) > 0.05,
+                  let bounds = windowBounds(from: info[kCGWindowBounds as String]),
+                  bounds.intersects(mainBounds) else {
+                return nil
+            }
+            return bounds
+        }
+
+        return isCovered(mainBounds, by: coveringBounds)
+    }
+
+    private static func isCovered(_ mainBounds: CGRect, by coveringBounds: [CGRect]) -> Bool {
+        guard !coveringBounds.isEmpty else {
+            return false
+        }
+
+        let sampleWidth = mainBounds.width / CGFloat(coveredSampleColumns)
+        let sampleHeight = mainBounds.height / CGFloat(coveredSampleRows)
+        var coveredSamples = 0
+        let totalSamples = coveredSampleColumns * coveredSampleRows
+
+        for column in 0 ..< coveredSampleColumns {
+            for row in 0 ..< coveredSampleRows {
+                let point = CGPoint(
+                    x: mainBounds.minX + (CGFloat(column) + 0.5) * sampleWidth,
+                    y: mainBounds.minY + (CGFloat(row) + 0.5) * sampleHeight
+                )
+                if coveringBounds.contains(where: { $0.contains(point) }) {
+                    coveredSamples += 1
+                }
+            }
+        }
+
+        return Double(coveredSamples) / Double(totalSamples) >= coveredSampleThreshold
+    }
+
+    private static func restoreMainWindowIfNeeded() {
+        guard let mainWindow = mainWindowHiddenForMiniWindow else {
+            return
+        }
+
+        mainWindowHiddenForMiniWindow = nil
+        hiddenMainWindowBounds = nil
+        coveringApplicationPID = nil
+        mainWindow.orderFront(nil)
+    }
+
+    private static func onScreenWindowInfo() -> [[String: Any]]? {
+        CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]]
+    }
+
+    private static func windowBounds(from value: Any?) -> CGRect? {
+        guard let dictionary = value as? [String: Any],
+              let x = numberValue(dictionary["X"]),
+              let y = numberValue(dictionary["Y"]),
+              let width = numberValue(dictionary["Width"]),
+              let height = numberValue(dictionary["Height"]) else {
+            return nil
+        }
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+
+    private static func integerValue(_ value: Any?) -> Int? {
+        (value as? NSNumber)?.intValue ?? value as? Int
+    }
+
+    private static func numberValue(_ value: Any?) -> CGFloat? {
+        if let number = value as? NSNumber {
+            return CGFloat(number.doubleValue)
+        }
+        return value as? CGFloat
+    }
+
 }
 
 private struct SpeecharaMenuBarMenu: View {
@@ -512,7 +859,7 @@ private struct SpeecharaMenuBarMenu: View {
     }
 
     private func openListeningWindow() {
-        openWindow(id: "speechara-listening-mini")
+        openWindow(id: "speechara-main")
         NSApp.activate(ignoringOtherApps: true)
     }
 }
@@ -1025,7 +1372,7 @@ private final class MeetingDetectionStore: ObservableObject {
         if let startListeningHandler {
             startListeningHandler()
         } else if let viewModel {
-            viewModel.startListening(mode: .newSession, includeMicrophone: viewModel.startsWithMicrophoneEnabled)
+            viewModel.promptAndStartListening(includeMicrophone: viewModel.startsWithMicrophoneEnabled)
         }
 
         if let meeting, meeting.detectionSource == .windowSignal {

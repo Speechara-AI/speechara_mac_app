@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 enum DeepSeekTranslationError: LocalizedError {
     case authenticationRequired
@@ -7,6 +8,7 @@ enum DeepSeekTranslationError: LocalizedError {
     case requestFailed(Error)
     case serverError(String)
     case alreadyConnected
+    case timedOut
 
     var errorDescription: String? {
         switch self {
@@ -22,6 +24,8 @@ enum DeepSeekTranslationError: LocalizedError {
             return "The AI backend returned an error: \(message)"
         case .alreadyConnected:
             return "Live translation is already connected."
+        case .timedOut:
+            return "Live translation did not respond in time."
         }
     }
 }
@@ -38,7 +42,11 @@ struct DeepSeekTranslationHistoryTurn: Sendable {
 }
 
 actor DeepSeekTranslationService {
-    private static let maxLiveTranslationAttempts = 4
+    private static let maxLiveTranslationAttempts = 1
+    // Mirrors the web client: never let a lost backend response block the live queue forever.
+    private static let liveTranslationTurnTimeoutNanoseconds: UInt64 = 8_000_000_000
+    private static let diagnosticsInterval: TimeInterval = 5
+    private static let logger = Logger(subsystem: "ai.speechara.mac", category: "DeepSeekTranslation")
     private static let reconnectDelayNanoseconds: [UInt64] = [
         400_000_000,
         1_200_000_000,
@@ -55,6 +63,7 @@ actor DeepSeekTranslationService {
     private var targetLanguageCode = ""
     private var recentHistoryTurns: [DeepSeekTranslationHistoryTurn] = []
     private var pendingTranscriptChunks: [PendingTranslationChunk] = []
+    private var shouldDispatchLiveChunkNext = true
     private var isProcessingQueue = false
     private var processingTask: Task<Void, Never>?
     private var eventHandler: (@Sendable (DeepSeekTranslationEvent) -> Void)?
@@ -63,10 +72,19 @@ actor DeepSeekTranslationService {
     private var receiveTask: Task<Void, Never>?
     private var keepAliveTask: Task<Void, Never>?
     private var readyContinuation: CheckedContinuation<Void, Error>?
-    private var pendingTurnContinuations = [String: CheckedContinuation<String, Error>]()
+    private var pendingTurnContinuations = [String: PendingTranslationContinuation]()
+    private var latestTranslationRevisionByTurn = [String: Int]()
+    private var finalizedTranslationTurnIDs = Set<String>()
     private var translationSocketReady = false
     private var isStopping = false
     private var liveSessionID = UUID().uuidString
+    private var lastDiagnosticsLogDate = Date()
+    private var enqueuedChunkCount = 0
+    private var completedChunkCount = 0
+    private var droppedChunkCount = 0
+    private var maxPendingChunkCount = 0
+    private var translationDurationTotalMilliseconds = 0.0
+    private var translationDurationSampleCount = 0
 
     init(
         session: URLSession = .shared,
@@ -93,12 +111,16 @@ actor DeepSeekTranslationService {
         self.targetLanguageName = targetLanguageName
         self.eventHandler = eventHandler
         pendingTranscriptChunks = []
+        shouldDispatchLiveChunkNext = true
+        latestTranslationRevisionByTurn = [:]
+        finalizedTranslationTurnIDs = []
         isProcessingQueue = false
         processingTask?.cancel()
         processingTask = nil
         translationSocketReady = false
         isStopping = false
         liveSessionID = UUID().uuidString
+        resetDiagnostics()
 
         do {
             try await establishTranslationSocket()
@@ -108,24 +130,33 @@ actor DeepSeekTranslationService {
         }
     }
 
+    func enqueueInterimChunk(_ transcript: String, turnID: UUID) {
+        enqueueChunk(transcript, turnID: turnID, isFinal: false)
+    }
+
     func enqueueFinalChunk(_ transcript: String, turnID: UUID) {
+        enqueueChunk(transcript, turnID: turnID, isFinal: true)
+    }
+
+    private func enqueueChunk(_ transcript: String, turnID: UUID, isFinal: Bool) {
         let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTranscript.isEmpty else {
             return
         }
 
-        if let lastIndex = pendingTranscriptChunks.indices.last,
-           pendingTranscriptChunks[lastIndex].turnID == turnID {
-            pendingTranscriptChunks[lastIndex].transcript = mergedTranscriptChunk(
-                existing: pendingTranscriptChunks[lastIndex].transcript,
-                addition: trimmedTranscript
-            )
+        if let existingIndex = pendingTranscriptChunks.lastIndex(where: { $0.turnID == turnID }) {
+            pendingTranscriptChunks[existingIndex].transcript = trimmedTranscript
+            pendingTranscriptChunks[existingIndex].isFinal = pendingTranscriptChunks[existingIndex].isFinal || isFinal
         } else {
             pendingTranscriptChunks.append(
-                PendingTranslationChunk(turnID: turnID, transcript: trimmedTranscript)
+                PendingTranslationChunk(turnID: turnID, transcript: trimmedTranscript, isFinal: isFinal)
             )
         }
 
+        enqueuedChunkCount += 1
+        maxPendingChunkCount = max(maxPendingChunkCount, pendingTranscriptChunks.count)
+
+        logDiagnosticsIfNeeded(reason: "enqueue")
         guard !isProcessingQueue else {
             return
         }
@@ -142,6 +173,9 @@ actor DeepSeekTranslationService {
         processingTask?.cancel()
         processingTask = nil
         pendingTranscriptChunks.removeAll()
+        shouldDispatchLiveChunkNext = true
+        latestTranslationRevisionByTurn.removeAll()
+        finalizedTranslationTurnIDs.removeAll()
         isProcessingQueue = false
         recentHistoryTurns = []
 
@@ -164,6 +198,7 @@ actor DeepSeekTranslationService {
         eventHandler = nil
         isStopping = false
         liveSessionID = UUID().uuidString
+        resetDiagnostics()
     }
 
     func replaceHistory(with turns: [DeepSeekTranslationHistoryTurn]) {
@@ -235,21 +270,51 @@ actor DeepSeekTranslationService {
             }
 
             do {
+                let startedAt = Date()
                 let translation = try await requestLiveTranslationWithReconnect(
                     for: nextChunk.transcript,
-                    turnID: nextChunk.turnID
+                    turnID: nextChunk.turnID,
+                    isFinal: nextChunk.isFinal
                 )
-                recentHistoryTurns.append(
-                    DeepSeekTranslationHistoryTurn(
-                        source: nextChunk.transcript,
-                        translation: translation
+                let elapsedMilliseconds = Date().timeIntervalSince(startedAt) * 1_000
+                completedChunkCount += 1
+                translationDurationTotalMilliseconds += elapsedMilliseconds
+                translationDurationSampleCount += 1
+                if nextChunk.isFinal {
+                    recentHistoryTurns.append(
+                        DeepSeekTranslationHistoryTurn(
+                            source: nextChunk.transcript,
+                            translation: translation
+                        )
                     )
-                )
-                recentHistoryTurns = Array(recentHistoryTurns.suffix(maxHistoryTurns))
-                eventHandler?(.completed(nextChunk.turnID, translation))
+                    recentHistoryTurns = Array(recentHistoryTurns.suffix(maxHistoryTurns))
+                    eventHandler?(.completed(nextChunk.turnID, translation))
+                } else {
+                    eventHandler?(.preview(nextChunk.turnID, translation))
+                }
+                logDiagnosticsIfNeeded(reason: "completed")
             } catch is CancellationError {
                 pendingTranscriptChunks.removeAll()
                 return
+            } catch DeepSeekTranslationError.timedOut where !nextChunk.isFinal {
+                // A draft is disposable because a newer draft for the same turn is already
+                // queued (or will arrive shortly). Reconnecting lets that newest text through.
+                droppedChunkCount += 1
+                Self.logger.warning(
+                    "Dropped stalled interim translation turnId=\(nextChunk.turnID.uuidString, privacy: .public)"
+                )
+                logDiagnosticsIfNeeded(reason: "interim-timeout")
+                continue
+            } catch let error as DeepSeekTranslationError where isRecoverableTranslationError(error) {
+                // A temporary backend or network failure must never pause translation for
+                // the user. Keep the completed turn for a later retry and let newer live
+                // text take priority as soon as it arrives.
+                requeueForRecovery(nextChunk)
+                Self.logger.warning(
+                    "Retrying live translation after recoverable error=\(error.localizedDescription, privacy: .public)"
+                )
+                try? await Task.sleep(nanoseconds: Self.reconnectDelayNanoseconds[0])
+                continue
             } catch let error as DeepSeekTranslationError {
                 pendingTranscriptChunks.removeAll()
                 eventHandler?(.failed(error.localizedDescription))
@@ -267,12 +332,75 @@ actor DeepSeekTranslationService {
             return nil
         }
 
-        return pendingTranscriptChunks.removeFirst()
+        let newestLiveIndex = pendingTranscriptChunks.lastIndex(where: { !$0.isFinal })
+        let newestFinalIndex = pendingTranscriptChunks.lastIndex(where: \.isFinal)
+
+        // Keep two independent priorities on the single live connection. A preview must
+        // remain current, while a completed phrase must not be starved by ongoing speech.
+        // Alternating the lanes bounds both delays to one model request.
+        let nextIndex: Int
+        if shouldDispatchLiveChunkNext, let newestLiveIndex {
+            nextIndex = newestLiveIndex
+            shouldDispatchLiveChunkNext = false
+        } else if let newestFinalIndex {
+            nextIndex = newestFinalIndex
+            shouldDispatchLiveChunkNext = true
+        } else if let newestLiveIndex {
+            nextIndex = newestLiveIndex
+            shouldDispatchLiveChunkNext = false
+        } else {
+            return nil
+        }
+
+        return pendingTranscriptChunks.remove(at: nextIndex)
+    }
+
+    private func requeueForRecovery(_ chunk: PendingTranslationChunk) {
+        if let index = pendingTranscriptChunks.lastIndex(where: { $0.turnID == chunk.turnID }) {
+            pendingTranscriptChunks[index].transcript = chunk.transcript
+            pendingTranscriptChunks[index].isFinal = pendingTranscriptChunks[index].isFinal || chunk.isFinal
+        } else {
+            pendingTranscriptChunks.insert(chunk, at: 0)
+        }
+    }
+
+    private func resetDiagnostics() {
+        lastDiagnosticsLogDate = Date()
+        enqueuedChunkCount = 0
+        completedChunkCount = 0
+        droppedChunkCount = 0
+        maxPendingChunkCount = 0
+        translationDurationTotalMilliseconds = 0
+        translationDurationSampleCount = 0
+    }
+
+    private func logDiagnosticsIfNeeded(reason: String) {
+        let now = Date()
+        guard now.timeIntervalSince(lastDiagnosticsLogDate) >= Self.diagnosticsInterval else {
+            return
+        }
+
+        let averageTranslationMilliseconds = translationDurationSampleCount > 0
+            ? translationDurationTotalMilliseconds / Double(translationDurationSampleCount)
+            : 0
+
+        Self.logger.info(
+            "Translation queue diagnostics reason=\(reason, privacy: .public) pendingChunks=\(self.pendingTranscriptChunks.count, privacy: .public) maxPendingChunks=\(self.maxPendingChunkCount, privacy: .public) enqueued=\(self.enqueuedChunkCount, privacy: .public) completed=\(self.completedChunkCount, privacy: .public) dropped=\(self.droppedChunkCount, privacy: .public) avgTranslationMs=\(averageTranslationMilliseconds, privacy: .public)"
+        )
+
+        lastDiagnosticsLogDate = now
+        enqueuedChunkCount = 0
+        completedChunkCount = 0
+        droppedChunkCount = 0
+        maxPendingChunkCount = pendingTranscriptChunks.count
+        translationDurationTotalMilliseconds = 0
+        translationDurationSampleCount = 0
     }
 
     private func requestLiveTranslationWithReconnect(
         for transcript: String,
-        turnID: UUID
+        turnID: UUID,
+        isFinal: Bool
     ) async throws -> String {
         var attempt = 0
         var lastError: Error?
@@ -284,19 +412,42 @@ actor DeepSeekTranslationService {
 
             do {
                 try await ensureTranslationSocketReady()
-                return try await requestLiveTranslation(for: transcript, turnID: turnID)
+                return try await requestLiveTranslationWithTimeout(
+                    for: transcript,
+                    turnID: turnID,
+                    isFinal: isFinal
+                )
             } catch is CancellationError {
                 throw CancellationError()
+            } catch DeepSeekTranslationError.timedOut {
+                // The server can keep a WebSocket open after its upstream model stalls.
+                // Discard an obsolete preview; preserve a final turn by retrying it below.
+                await closeSocketForReconnect()
+                guard isFinal else {
+                    throw DeepSeekTranslationError.timedOut
+                }
+
+                lastError = DeepSeekTranslationError.timedOut
+                attempt += 1
+
+                guard attempt < Self.maxLiveTranslationAttempts else {
+                    throw DeepSeekTranslationError.timedOut
+                }
+
+                let delayIndex = min(attempt - 1, Self.reconnectDelayNanoseconds.count - 1)
+                try await Task.sleep(nanoseconds: Self.reconnectDelayNanoseconds[delayIndex])
             } catch {
                 lastError = error
                 attempt += 1
+
+                // Do not reuse a socket that has already failed a request. The outer
+                // recovery loop will keep the session alive and dispatch fresh text.
+                await closeSocketForReconnect()
 
                 guard attempt < Self.maxLiveTranslationAttempts,
                       isRecoverableTranslationError(error) else {
                     throw error
                 }
-
-                await closeSocketForReconnect()
 
                 let delayIndex = min(attempt - 1, Self.reconnectDelayNanoseconds.count - 1)
                 try await Task.sleep(nanoseconds: Self.reconnectDelayNanoseconds[delayIndex])
@@ -367,7 +518,7 @@ actor DeepSeekTranslationService {
         }
 
         switch translationError {
-        case .requestFailed, .invalidResponse, .serverError:
+        case .requestFailed, .invalidResponse, .serverError, .timedOut:
             return true
         case .authenticationRequired, .invalidRequest, .alreadyConnected:
             return false
@@ -393,7 +544,8 @@ actor DeepSeekTranslationService {
 
     private func requestLiveTranslation(
         for transcript: String,
-        turnID: UUID
+        turnID: UUID,
+        isFinal: Bool
     ) async throws -> String {
         guard webSocketTask != nil, translationSocketReady else {
             throw DeepSeekTranslationError.requestFailed(URLError(.networkConnectionLost))
@@ -403,12 +555,16 @@ actor DeepSeekTranslationService {
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                pendingTurnContinuations[turnKey] = continuation
+                pendingTurnContinuations[turnKey] = PendingTranslationContinuation(
+                    continuation: continuation,
+                    expectsFinalRevision: isFinal
+                )
 
                 Task { [weak self] in
                     await self?.sendTranslateTurn(
                         transcript: transcript,
-                        turnKey: turnKey
+                        turnKey: turnKey,
+                        isFinal: isFinal
                     )
                 }
             }
@@ -422,9 +578,39 @@ actor DeepSeekTranslationService {
         }
     }
 
+    private func requestLiveTranslationWithTimeout(
+        for transcript: String,
+        turnID: UUID,
+        isFinal: Bool
+    ) async throws -> String {
+        try await withThrowingTaskGroup(of: String.self) { group in
+            group.addTask {
+                try await self.requestLiveTranslation(
+                    for: transcript,
+                    turnID: turnID,
+                    isFinal: isFinal
+                )
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: Self.liveTranslationTurnTimeoutNanoseconds)
+                throw DeepSeekTranslationError.timedOut
+            }
+
+            defer {
+                group.cancelAll()
+            }
+
+            guard let result = try await group.next() else {
+                throw DeepSeekTranslationError.invalidResponse
+            }
+            return result
+        }
+    }
+
     private func sendTranslateTurn(
         transcript: String,
-        turnKey: String
+        turnKey: String,
+        isFinal: Bool
     ) async {
         do {
             try await sendSocketMessage(
@@ -432,7 +618,7 @@ actor DeepSeekTranslationService {
                     type: "translate_turn",
                     turnId: turnKey,
                     transcript: transcript,
-                    isFinal: true,
+                    isFinal: isFinal,
                     sourceLanguage: sourceLanguageCode
                 )
             )
@@ -564,7 +750,7 @@ actor DeepSeekTranslationService {
             readyContinuation = nil
         case "translation_revision":
             let revision = try JSONDecoder().decode(TranslationRevisionMessage.self, from: data)
-            guard let turnID = UUID(uuidString: revision.turnId) else {
+            guard UUID(uuidString: revision.turnId) != nil else {
                 return
             }
 
@@ -573,10 +759,18 @@ actor DeepSeekTranslationService {
                 return
             }
 
+            let previousRevision = latestTranslationRevisionByTurn[revision.turnId] ?? 0
+            guard revision.revision > previousRevision,
+                  !finalizedTranslationTurnIDs.contains(revision.turnId) else {
+                return
+            }
+            latestTranslationRevisionByTurn[revision.turnId] = revision.revision
+
             if revision.isFinal {
+                finalizedTranslationTurnIDs.insert(revision.turnId)
                 resumePendingTurn(revision.turnId, with: .success(trimmedText))
             } else {
-                eventHandler?(.preview(turnID, trimmedText))
+                resumePendingInterimTurnIfNeeded(revision.turnId, with: trimmedText)
             }
         case "error":
             let errorMessage = (try? JSONDecoder().decode(TranslationSocketErrorMessage.self, from: data))?.message
@@ -620,25 +814,35 @@ actor DeepSeekTranslationService {
     private func failAllPendingTurns(with error: Error) {
         let continuations = pendingTurnContinuations.values
         pendingTurnContinuations.removeAll()
-        for continuation in continuations {
-            continuation.resume(throwing: error)
+        for pending in continuations {
+            pending.continuation.resume(throwing: error)
         }
     }
 
     private func failPendingTurn(_ turnKey: String, with error: Error) {
-        guard let continuation = pendingTurnContinuations.removeValue(forKey: turnKey) else {
+        guard let pending = pendingTurnContinuations.removeValue(forKey: turnKey) else {
             return
         }
 
-        continuation.resume(throwing: error)
+        pending.continuation.resume(throwing: error)
     }
 
     private func resumePendingTurn(_ turnKey: String, with result: Result<String, Error>) {
-        guard let continuation = pendingTurnContinuations.removeValue(forKey: turnKey) else {
+        guard let pending = pendingTurnContinuations.removeValue(forKey: turnKey) else {
             return
         }
 
-        continuation.resume(with: result)
+        pending.continuation.resume(with: result)
+    }
+
+    private func resumePendingInterimTurnIfNeeded(_ turnKey: String, with translation: String) {
+        guard let pending = pendingTurnContinuations[turnKey],
+              !pending.expectsFinalRevision else {
+            return
+        }
+
+        pendingTurnContinuations.removeValue(forKey: turnKey)
+        pending.continuation.resume(returning: translation)
     }
 
     private func makeSystemMessage() -> SpeecharaChatMessage {
@@ -680,6 +884,12 @@ actor DeepSeekTranslationService {
 private struct PendingTranslationChunk {
     let turnID: UUID
     var transcript: String
+    var isFinal: Bool
+}
+
+private struct PendingTranslationContinuation {
+    let continuation: CheckedContinuation<String, Error>
+    let expectsFinalRevision: Bool
 }
 
 private struct TranslationMessageEnvelope: Decodable {

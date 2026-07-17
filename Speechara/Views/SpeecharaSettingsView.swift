@@ -3,6 +3,7 @@ import SwiftUI
 struct SpeecharaSettingsView: View {
     @EnvironmentObject private var localizationStore: SpeecharaLocalizationStore
     @AppStorage("speechara.appearanceMode") private var appearanceModeRawValue = SpeecharaAppearanceMode.system.rawValue
+    @AppStorage("speechara.isMiniWindowEnabled") private var isMiniWindowEnabled = true
 
     private var appearanceMode: SpeecharaAppearanceMode {
         SpeecharaAppearanceMode(rawValue: appearanceModeRawValue) ?? .system
@@ -15,7 +16,7 @@ struct SpeecharaSettingsView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    Text("Settings")
+                    Text(SL("Settings"))
                         .font(.system(size: 34, weight: .bold, design: .rounded))
                         .foregroundStyle(SpeecharaSettingsTheme.primaryText)
 
@@ -26,6 +27,10 @@ struct SpeecharaSettingsView: View {
 
                         SpeecharaSettingsPanel(title: "Interface language") {
                             languageSelector
+                        }
+
+                        SpeecharaSettingsPanel(title: "Mini Window") {
+                            miniWindowToggle
                         }
 
 #if !APP_STORE
@@ -86,6 +91,7 @@ struct SpeecharaSettingsView: View {
             Menu {
                 ForEach(SpeecharaAppLanguage.allCases) { language in
                     Button {
+                        NotificationCenter.default.post(name: .speecharaInterfaceLanguageWillChange, object: nil)
                         localizationStore.setLanguage(language)
                     } label: {
                         HStack {
@@ -131,6 +137,45 @@ struct SpeecharaSettingsView: View {
         )
     }
 
+    private var miniWindowToggle: some View {
+        Toggle(isOn: $isMiniWindowEnabled) {
+            HStack(spacing: 12) {
+                Image(systemName: "macwindow.on.rectangle")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(SpeecharaSettingsTheme.secondaryText)
+                    .frame(width: 24)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(SL("Show mini window"))
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .foregroundStyle(SpeecharaSettingsTheme.primaryText)
+
+                    Text(SL("Automatically show the floating listening window while a session is active."))
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(SpeecharaSettingsTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .toggleStyle(.switch)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(minHeight: 58)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(SpeecharaSettingsTheme.controlFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(SpeecharaSettingsTheme.controlBorder, lineWidth: 1)
+        )
+        .onChange(of: isMiniWindowEnabled) { isEnabled in
+            if !isEnabled {
+                SpeecharaMiniWindowCoordinator.closeMiniWindow()
+            }
+        }
+    }
+
     private var updateControl: some View {
 #if APP_STORE
         EmptyView()
@@ -143,7 +188,7 @@ struct SpeecharaSettingsView: View {
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(SpeecharaSettingsTheme.accent)
 
-                Text("Check for Updates...")
+                Text(SL("Check for Updates..."))
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .foregroundStyle(SpeecharaSettingsTheme.primaryText)
 
@@ -235,7 +280,7 @@ private struct SpeecharaSettingsPanel<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(title)
+            Text(SL(title))
                 .font(.system(size: 17, weight: .bold, design: .rounded))
                 .foregroundStyle(SpeecharaSettingsTheme.primaryText)
 

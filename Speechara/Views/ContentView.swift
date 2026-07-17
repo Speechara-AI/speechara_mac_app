@@ -5,9 +5,9 @@ struct ContentView: View {
     @EnvironmentObject private var authStore: AuthSessionStore
     @EnvironmentObject private var viewModel: SubtitleViewModel
     @AppStorage("speechara.focusModeEnabled") private var isFocusModeEnabled = false
-    @AppStorage("speechara.livePreviewVisible") private var isLivePreviewVisible = true
     @State private var isListeningSetupPresented = false
     @State private var shouldStartListeningAfterSetup = false
+    @State private var isMicrophoneOffWarningDismissed = false
 
     var body: some View {
         GeometryReader { _ in
@@ -22,8 +22,10 @@ struct ContentView: View {
                     InlineStatusMessage(text: translationMessage, tint: .orange)
                 }
 
-                if isLivePreviewVisible {
-                    livePreviewCard
+                if shouldShowMicrophoneOffWarning {
+                    MicrophoneOffWarningBanner {
+                        isMicrophoneOffWarningDismissed = true
+                    }
                 }
 
                 HStack(alignment: .top, spacing: 20) {
@@ -66,68 +68,113 @@ struct ContentView: View {
         .onChange(of: isFocusModeEnabled) { isEnabled in
             viewModel.setFocusModeEnabled(isEnabled)
         }
+        .onChange(of: viewModel.isMicrophoneListening) { _ in
+            isMicrophoneOffWarningDismissed = false
+        }
+        .onChange(of: viewModel.hasActiveSession) { _ in
+            isMicrophoneOffWarningDismissed = false
+        }
+    }
+
+    private var shouldShowMicrophoneOffWarning: Bool {
+        viewModel.shouldShowMicrophoneOffWarning && !isMicrophoneOffWarningDismissed
     }
 
     private var heroSection: some View {
         SurfaceCard(accent: primaryActionTint.opacity(0.16)) {
-            HStack(alignment: .center, spacing: 12) {
-                if !isFocusModeEnabled {
-                    PrimaryActionButton(
-                        title: primaryActionTitle,
-                        subtitle: viewModel.hasActiveSession ? nil : SL("system audio"),
-                        systemImage: primaryActionIcon,
-                        tint: primaryActionTint,
-                        action: handlePrimaryAction
-                    )
-                    .disabled(primaryActionDisabled)
-                    .opacity(primaryActionDisabled ? 0.55 : 1)
+            ViewThatFits(in: .horizontal) {
+                fullToolbar
+                compactToolbar
+            }
+        }
+    }
 
-                    MicrophoneControl(
-                        viewModel: viewModel
-                    )
+    private var fullToolbar: some View {
+        HStack(alignment: .center, spacing: 12) {
+            if !isFocusModeEnabled {
+                PrimaryActionButton(
+                    title: primaryActionTitle,
+                    subtitle: viewModel.hasActiveSession ? nil : SL("system audio"),
+                    systemImage: primaryActionIcon,
+                    tint: primaryActionTint,
+                    action: handlePrimaryAction
+                )
+                .disabled(primaryActionDisabled)
+                .opacity(primaryActionDisabled ? 0.55 : 1)
 
-                    if showsSessionToolbarControls {
-                        settingsStrip
-                    }
+                MicrophoneControl(
+                    viewModel: viewModel
+                )
+
+                if showsSessionToolbarControls {
+                    settingsStrip
                 }
+            }
 
-                if let activityText = viewModel.assistantActivityText {
-                    LiveStatusPill(
-                        title: activityText,
-                        systemImage: "sparkles",
-                        tint: Color(red: 0.56, green: 0.35, blue: 0.88)
-                    )
+            if let activityText = viewModel.assistantActivityText {
+                LiveStatusPill(
+                    title: activityText,
+                    systemImage: "sparkles",
+                    tint: Color(red: 0.56, green: 0.35, blue: 0.88)
+                )
+            }
+
+            Spacer(minLength: 12)
+
+            ToolbarSecondaryButton(
+                title: "New",
+                systemImage: "plus.circle"
+            ) {
+                viewModel.startNewSession()
+            }
+
+            ToolbarSecondaryButton(
+                title: isFocusModeEnabled ? "Exit" : "Focus",
+                systemImage: isFocusModeEnabled ? "rectangle.compress.vertical" : "rectangle.expand.vertical",
+                isActive: isFocusModeEnabled
+            ) {
+                isFocusModeEnabled.toggle()
+            }
+        }
+    }
+
+    private var compactToolbar: some View {
+        HStack(alignment: .center, spacing: 10) {
+            if !isFocusModeEnabled {
+                PrimaryActionButton(
+                    title: primaryActionTitle,
+                    subtitle: nil,
+                    systemImage: primaryActionIcon,
+                    tint: primaryActionTint,
+                    action: handlePrimaryAction
+                )
+                .disabled(primaryActionDisabled)
+                .opacity(primaryActionDisabled ? 0.55 : 1)
+
+                MicrophoneControl(
+                    viewModel: viewModel
+                )
+
+                if showsSessionToolbarControls {
+                    sessionSettingsMenu
                 }
+            }
 
-                Spacer(minLength: 12)
+            Spacer(minLength: 8)
 
-                if !isFocusModeEnabled && showsSessionToolbarControls {
-                    savedAudioStrip
-                }
+            ToolbarSecondaryButton(
+                title: "New",
+                systemImage: "plus.circle"
+            ) {
+                viewModel.startNewSession()
+            }
 
-                if !isFocusModeEnabled && !isLivePreviewVisible {
-                    ToolbarSecondaryButton(
-                        title: "Show Preview",
-                        systemImage: "eye"
-                    ) {
-                        isLivePreviewVisible = true
-                    }
-                }
-
-                ToolbarSecondaryButton(
-                    title: "New Session",
-                    systemImage: "plus.circle"
-                ) {
-                    viewModel.startNewSession()
-                }
-
-                ToolbarSecondaryButton(
-                    title: isFocusModeEnabled ? "Exit Focus" : "Focus Mode",
-                    systemImage: isFocusModeEnabled ? "rectangle.compress.vertical" : "rectangle.expand.vertical",
-                    isActive: isFocusModeEnabled
-                ) {
-                    isFocusModeEnabled.toggle()
-                }
+            ToolbarSecondaryButton(
+                title: isFocusModeEnabled ? "Exit" : "Focus",
+                systemImage: isFocusModeEnabled ? "rectangle.compress.vertical" : "rectangle.expand.vertical",
+                isActive: isFocusModeEnabled
+            ) {
+                isFocusModeEnabled.toggle()
             }
         }
     }
@@ -138,7 +185,7 @@ struct ContentView: View {
 
     private var savedAudioStrip: some View {
         HStack(spacing: 10) {
-            Label("Saved audio", systemImage: "waveform")
+            Label(SL("Saved audio"), systemImage: "waveform")
                 .font(.system(size: 12, weight: .bold, design: .rounded))
                 .foregroundStyle(.secondary)
 
@@ -195,11 +242,12 @@ struct ContentView: View {
                 }
             } label: {
                 SettingStripPill(
-                    title: "Input",
-                    value: viewModel.selectedSourceLanguage.displayName,
+                    title: "IN",
+                    value: viewModel.selectedSourceLanguage.deepgramLanguageCode.uppercased(),
                     systemImage: "ear",
                     showsChevron: true
                 )
+                .help(SLF("Input: %@", viewModel.selectedSourceLanguage.displayName))
             }
             .menuStyle(.borderlessButton)
 
@@ -207,16 +255,17 @@ struct ContentView: View {
                 viewModel.isAudioRecordingEnabled.toggle()
             } label: {
                 SettingStripPill(
-                    title: "Recording",
+                    title: "REC",
                     value: viewModel.isAudioRecordingEnabled ? "On" : "Off",
                     systemImage: "waveform",
                     tint: viewModel.isAudioRecordingEnabled ? Color(red: 0.10, green: 0.59, blue: 0.46) : .secondary
                 )
+                .help(viewModel.isAudioRecordingEnabled ? SL("Audio recording is enabled") : SL("Audio recording is disabled"))
             }
             .buttonStyle(.plain)
 
             Menu {
-                Button("Off") {
+                Button(SL("Off")) {
                     viewModel.isTranslationEnabled = false
                 }
 
@@ -230,55 +279,98 @@ struct ContentView: View {
                 }
             } label: {
                 SettingStripPill(
-                    title: "Translation",
-                    value: viewModel.isTranslationEnabled ? viewModel.selectedTranslationLanguage.displayName : "Off",
-                    systemImage: viewModel.isTranslationEnabled ? "globe" : "globe.slash",
+                    title: nil,
+                    value: nil,
+                    systemImage: "translate",
                     tint: viewModel.isTranslationEnabled ? Color(red: 0.40, green: 0.44, blue: 0.92) : .secondary,
                     showsChevron: true
                 )
+                .help(viewModel.translationSummary)
             }
             .menuStyle(.borderlessButton)
         }
     }
 
-    private var livePreviewCard: some View {
-        SurfaceCard {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 12) {
-                    Text("Live transcript preview")
-                        .font(.headline)
-
-                    Spacer()
-
+    private var sessionSettingsMenu: some View {
+        Menu {
+            Menu(SL("Input language")) {
+                ForEach(SourceLanguageOption.allCases) { language in
                     Button {
-                        isLivePreviewVisible = false
+                        viewModel.selectedSourceLanguage = language
                     } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.secondary)
+                        Label(
+                            language.displayName,
+                            systemImage: language == viewModel.selectedSourceLanguage ? "checkmark" : "ear"
+                        )
                     }
-                    .buttonStyle(.plain)
-                    .help(SL("Hide live transcript preview"))
+                }
+            }
+
+            Menu(SL("Translation")) {
+                Button {
+                    viewModel.isTranslationEnabled = false
+                } label: {
+                    Label(SL("Off"), systemImage: viewModel.isTranslationEnabled ? "globe.slash" : "checkmark")
                 }
 
-                Text(viewModel.liveSubtitleDescription)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14)
-                            .fill(Color.secondary.opacity(0.08))
-                    )
+                Divider()
+
+                ForEach(viewModel.availableTranslationLanguages) { language in
+                    Button {
+                        viewModel.isTranslationEnabled = true
+                        viewModel.selectedTranslationLanguage = language
+                    } label: {
+                        Label(
+                            language.displayName,
+                            systemImage: viewModel.isTranslationEnabled && language == viewModel.selectedTranslationLanguage ? "checkmark" : "globe"
+                        )
+                    }
+                }
             }
+
+            Button {
+                viewModel.isAudioRecordingEnabled.toggle()
+            } label: {
+                Label(
+                    viewModel.isAudioRecordingEnabled ? SL("Recording: On") : SL("Recording: Off"),
+                    systemImage: viewModel.isAudioRecordingEnabled ? "waveform" : "waveform.slash"
+                )
+            }
+
+            if viewModel.canRevealLastRecording {
+                Divider()
+
+                Button {
+                    viewModel.revealLastRecordingInFinder()
+                } label: {
+                    Label(SL("Show saved recording in Finder"), systemImage: "folder")
+                }
+            }
+        } label: {
+            SettingStripPill(
+                title: "Session",
+                value: sessionSummaryCode,
+                systemImage: "slider.horizontal.3",
+                showsChevron: true
+            )
         }
+        .menuStyle(.borderlessButton)
+        .help(SL("Session settings"))
+    }
+
+    private var sessionSummaryCode: String {
+        let input = viewModel.selectedSourceLanguage.deepgramLanguageCode.uppercased()
+        let translation = viewModel.isTranslationEnabled
+            ? viewModel.selectedTranslationLanguage.languageCode.uppercased()
+            : "Off"
+        return "\(input) / \(translation)"
     }
 
     private var transcriptColumn: some View {
         SurfaceCard {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .center, spacing: 10) {
-                    Text("Live transcript")
+                    Text(SL("Live transcript"))
                         .font(.title3.weight(.bold))
                         .help(SL("Editable during testing, with timestamped blocks."))
 
@@ -317,6 +409,7 @@ struct ContentView: View {
                     VSplitView {
                         historyPanel(
                             text: editableTranscriptBinding,
+                            draftText: viewModel.liveSubtitlePreview,
                             fontSize: viewModel.transcriptFontSize,
                             placeholder: viewModel.transcriptPlaceholderText
                         )
@@ -339,6 +432,7 @@ struct ContentView: View {
                     VSplitView {
                         historyPanel(
                             text: editableTranscriptBinding,
+                            draftText: viewModel.liveSubtitlePreview,
                             fontSize: viewModel.transcriptFontSize,
                             placeholder: viewModel.transcriptPlaceholderText
                         )
@@ -360,6 +454,7 @@ struct ContentView: View {
                 } else {
                     historyPanel(
                         text: editableTranscriptBinding,
+                        draftText: viewModel.liveSubtitlePreview,
                         fontSize: viewModel.transcriptFontSize,
                         placeholder: viewModel.transcriptPlaceholderText
                     )
@@ -374,7 +469,7 @@ struct ContentView: View {
         SurfaceCard(accent: Color.orange.opacity(0.18)) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 10) {
-                    Label("Suggested response", systemImage: "sparkles")
+                    Label(SL("Suggested response"), systemImage: "sparkles")
                         .font(.title3.weight(.bold))
                         .foregroundStyle(Color(red: 0.92, green: 0.64, blue: 0.12))
                         .help(SL("Looks at the latest transcript and suggests a natural response you can say on the call."))
@@ -445,6 +540,7 @@ struct ContentView: View {
                         historyPanel(
                             text: viewModel.translatedText,
                             entries: viewModel.translationEntries,
+                            draftText: viewModel.liveTranslationPreview,
                             fontSize: viewModel.translationFontSize,
                             isDialogueMode: viewModel.showsTranslationDialogueMode,
                             placeholder: viewModel.translationPlaceholderText
@@ -469,6 +565,7 @@ struct ContentView: View {
                         historyPanel(
                             text: viewModel.translatedText,
                             entries: viewModel.translationEntries,
+                            draftText: viewModel.liveTranslationPreview,
                             fontSize: viewModel.translationFontSize,
                             isDialogueMode: viewModel.showsTranslationDialogueMode,
                             placeholder: viewModel.translationPlaceholderText
@@ -493,6 +590,7 @@ struct ContentView: View {
                         historyPanel(
                             text: viewModel.translatedText,
                             entries: viewModel.translationEntries,
+                            draftText: viewModel.liveTranslationPreview,
                             fontSize: viewModel.translationFontSize,
                             isDialogueMode: viewModel.showsTranslationDialogueMode,
                             placeholder: viewModel.translationPlaceholderText
@@ -516,6 +614,7 @@ struct ContentView: View {
                     historyPanel(
                         text: viewModel.translatedText,
                         entries: viewModel.translationEntries,
+                        draftText: viewModel.liveTranslationPreview,
                         fontSize: viewModel.translationFontSize,
                         isDialogueMode: viewModel.showsTranslationDialogueMode,
                         placeholder: viewModel.translationPlaceholderText
@@ -528,7 +627,7 @@ struct ContentView: View {
     }
 
     private var clearSubtitlesButton: some View {
-        Button("Clear subtitles") {
+        Button(SL("Clear subtitles")) {
             viewModel.startNewSession()
         }
         .buttonStyle(.bordered)
@@ -583,7 +682,7 @@ struct ContentView: View {
         Task { @MainActor in
             do {
                 try await authStore.ensureActiveSession()
-                viewModel.startListening(mode: .newSession, includeMicrophone: viewModel.startsWithMicrophoneEnabled)
+                viewModel.promptAndStartListening(includeMicrophone: viewModel.startsWithMicrophoneEnabled)
             } catch {
                 viewModel.showErrorMessage(authStore.errorMessage ?? error.localizedDescription)
             }
@@ -599,10 +698,16 @@ struct ContentView: View {
 
     private func historyPanel(
         text: Binding<String>,
+        draftText: String,
         fontSize: CGFloat,
         placeholder: String
     ) -> some View {
-        EditableTextPanel(text: text, fontSize: fontSize, placeholder: placeholder)
+        EditableTextPanel(
+            text: text,
+            draftText: draftText,
+            fontSize: fontSize,
+            placeholder: placeholder
+        )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(
                 RoundedRectangle(cornerRadius: 14)
@@ -614,6 +719,7 @@ struct ContentView: View {
     private func historyPanel(
         text: String,
         entries: [DialogueEntry],
+        draftText: String,
         fontSize: CGFloat,
         isDialogueMode: Bool,
         placeholder: String
@@ -628,7 +734,7 @@ struct ContentView: View {
                     speakerLabel: viewModel.speakerDisplayLabel(for:)
                 )
             } else {
-                ReadOnlyTextPanel(text: text, fontSize: fontSize)
+                ReadOnlyTextPanel(text: text, draftText: draftText, fontSize: fontSize)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -645,12 +751,13 @@ struct ContentView: View {
 
 private struct EditableTextPanel: View {
     @Binding var text: String
+    let draftText: String
     let fontSize: CGFloat
     let placeholder: String
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            if text.isEmpty {
+            if text.isEmpty && draftText.isEmpty {
                 Text(placeholder)
                     .font(.system(size: fontSize, design: .monospaced))
                     .foregroundStyle(.secondary)
@@ -659,7 +766,11 @@ private struct EditableTextPanel: View {
                     .allowsHitTesting(false)
             }
 
-            AutoScrollingEditableTextView(text: $text, fontSize: fontSize)
+            AutoScrollingEditableTextView(
+                text: $text,
+                draftText: draftText,
+                fontSize: fontSize
+            )
                 .padding(8)
         }
         .background(
@@ -671,6 +782,7 @@ private struct EditableTextPanel: View {
 
 private struct AutoScrollingEditableTextView: NSViewRepresentable {
     @Binding var text: String
+    let draftText: String
     let fontSize: CGFloat
 
     func makeCoordinator() -> Coordinator {
@@ -690,7 +802,6 @@ private struct AutoScrollingEditableTextView: NSViewRepresentable {
         }
 
         textView.delegate = context.coordinator
-        textView.string = text
         textView.isRichText = false
         textView.importsGraphics = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -702,6 +813,7 @@ private struct AutoScrollingEditableTextView: NSViewRepresentable {
         textView.textContainerInset = NSSize(width: 8, height: 10)
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        context.coordinator.applyDisplayedText(to: textView)
 
         DispatchQueue.main.async {
             context.coordinator.scrollToBottom(textView)
@@ -717,10 +829,8 @@ private struct AutoScrollingEditableTextView: NSViewRepresentable {
             return
         }
 
-        if textView.string != text {
-            context.coordinator.isPerformingProgrammaticUpdate = true
-            textView.string = text
-            context.coordinator.isPerformingProgrammaticUpdate = false
+        if textView.string != context.coordinator.displayedText {
+            context.coordinator.applyDisplayedText(to: textView)
             DispatchQueue.main.async {
                 context.coordinator.scrollToBottom(textView)
             }
@@ -746,8 +856,80 @@ private struct AutoScrollingEditableTextView: NSViewRepresentable {
                 return
             }
 
-            parent.text = textView.string
+            parent.text = editableText(from: textView.string)
             scrollToBottom(textView)
+        }
+
+        func textView(
+            _ textView: NSTextView,
+            shouldChangeTextIn affectedCharRange: NSRange,
+            replacementString: String?
+        ) -> Bool {
+            guard let protectedRange = protectedDraftRange(in: textView.string) else {
+                return true
+            }
+
+            if affectedCharRange.length == 0 {
+                return affectedCharRange.location < protectedRange.location
+            }
+
+            return NSIntersectionRange(affectedCharRange, protectedRange).length == 0
+        }
+
+        var displayedText: String {
+            let cleanDraft = parent.draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanDraft.isEmpty else {
+                return parent.text
+            }
+
+            return parent.text.isEmpty ? cleanDraft : "\(parent.text)\n\(cleanDraft)"
+        }
+
+        func applyDisplayedText(to textView: NSTextView) {
+            let displayText = displayedText
+            let attributedText = NSMutableAttributedString(
+                string: displayText,
+                attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: parent.fontSize, weight: .regular),
+                    .foregroundColor: NSColor.labelColor,
+                ]
+            )
+
+            if let draftRange = protectedDraftRange(in: displayText) {
+                attributedText.addAttribute(
+                    .foregroundColor,
+                    value: NSColor.secondaryLabelColor,
+                    range: draftRange
+                )
+            }
+
+            isPerformingProgrammaticUpdate = true
+            textView.textStorage?.setAttributedString(attributedText)
+            isPerformingProgrammaticUpdate = false
+        }
+
+        private func editableText(from displayedText: String) -> String {
+            guard let protectedRange = protectedDraftRange(in: displayedText) else {
+                return displayedText
+            }
+
+            return (displayedText as NSString).substring(to: protectedRange.location)
+        }
+
+        private func protectedDraftRange(in displayedText: String) -> NSRange? {
+            let cleanDraft = parent.draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanDraft.isEmpty, displayedText.hasSuffix(cleanDraft) else {
+                return nil
+            }
+
+            let displayLength = (displayedText as NSString).length
+            let draftLength = (cleanDraft as NSString).length
+            var location = displayLength - draftLength
+            if location > 0,
+               (displayedText as NSString).substring(with: NSRange(location: location - 1, length: 1)) == "\n" {
+                location -= 1
+            }
+            return NSRange(location: location, length: displayLength - location)
         }
 
         func scrollToBottom(_ textView: NSTextView) {
@@ -759,13 +941,14 @@ private struct AutoScrollingEditableTextView: NSViewRepresentable {
 
 private struct ReadOnlyTextPanel: View {
     let text: String
+    let draftText: String
     let fontSize: CGFloat
     private let bottomAnchor = "read-only-bottom-anchor"
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                Text(text.isEmpty ? " " : text)
+                styledText
                     .font(.system(size: fontSize, design: .monospaced))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)
@@ -782,6 +965,24 @@ private struct ReadOnlyTextPanel: View {
                 scrollToBottom(using: proxy)
             }
         }
+    }
+
+    private var styledText: Text {
+        let displayText = text.isEmpty ? " " : text
+        let cleanDraft = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanDraft.isEmpty,
+              let draftRange = displayText.range(of: cleanDraft, options: .backwards) else {
+            return Text(displayText)
+                .foregroundColor(.primary)
+        }
+
+        let lineStart = displayText[..<draftRange.lowerBound].lastIndex(of: "\n")
+            .map { displayText.index(after: $0) }
+            ?? displayText.startIndex
+        let stableText = String(displayText[..<lineStart])
+        let workingText = String(displayText[lineStart...])
+        return Text(stableText).foregroundColor(.primary)
+            + Text(workingText).foregroundColor(.secondary)
     }
 
     private func scrollToBottom(using proxy: ScrollViewProxy) {
@@ -833,6 +1034,7 @@ private struct DialogueHistoryPanel: View {
                                 }
                                 Text(entry.text)
                                     .font(.system(size: fontSize, design: .monospaced))
+                                    .foregroundStyle(entry.isDraft ? Color.secondary : Color.primary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .textSelection(.enabled)
                             }
@@ -846,6 +1048,7 @@ private struct DialogueHistoryPanel: View {
                                 TimestampBadge(label: Self.timestampFormatter.string(from: entry.timestamp))
                                 Text(entry.text)
                                     .font(.system(size: fontSize, design: .monospaced))
+                                    .foregroundStyle(entry.isDraft ? Color.secondary : Color.primary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .textSelection(.enabled)
                             }
@@ -873,7 +1076,7 @@ private struct DialogueHistoryPanel: View {
             return "empty"
         }
 
-        return "\(entries.count)-\(lastEntry.id.uuidString)"
+        return "\(entries.count)-\(lastEntry.id.uuidString)-\(lastEntry.text.hashValue)-\(lastEntry.isDraft)"
     }
 
     private func scrollToBottom(using proxy: ScrollViewProxy) {
@@ -926,6 +1129,45 @@ private struct TimestampBadge: View {
                     .fill(Color.secondary.opacity(0.10))
             )
             .foregroundStyle(.secondary)
+    }
+}
+
+private struct MicrophoneOffWarningBanner: View {
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "mic.slash.fill")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(Color(red: 0.86, green: 0.43, blue: 0.02))
+                .frame(width: 24, height: 24)
+
+            Text(SL("Microphone is off. Your replies will not be included in the transcript."))
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color(red: 0.58, green: 0.28, blue: 0.02))
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 12)
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Color(red: 0.70, green: 0.34, blue: 0.04).opacity(0.72))
+            }
+            .buttonStyle(.plain)
+            .help(SL("Hide warning"))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(red: 1.00, green: 0.95, blue: 0.86))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color(red: 0.90, green: 0.48, blue: 0.08).opacity(0.32), lineWidth: 1)
+        )
     }
 }
 
@@ -1154,8 +1396,8 @@ private struct LiveStatusPill: View {
 }
 
 private struct SettingStripPill: View {
-    let title: String
-    let value: String
+    let title: String?
+    let value: String?
     let systemImage: String
     var tint: Color = .secondary
     var showsChevron = false
@@ -1163,19 +1405,21 @@ private struct SettingStripPill: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: systemImage)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: title == nil && value == nil ? 14 : 13, weight: .semibold))
                 .foregroundStyle(tint)
                 .frame(width: 16)
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text(SL(title))
-                    .font(.system(size: 10, weight: .bold, design: .rounded))
-                    .textCase(.uppercase)
-                    .tracking(0.4)
-                    .foregroundStyle(.secondary)
-                Text(SL(value))
-                    .font(.system(size: 14, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.primary)
+            if let title, let value {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(SL(title))
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .textCase(.uppercase)
+                        .tracking(0.4)
+                        .foregroundStyle(.secondary)
+                    Text(SL(value))
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.primary)
+                }
             }
 
             if showsChevron {
@@ -1185,6 +1429,7 @@ private struct SettingStripPill: View {
             }
         }
         .padding(.horizontal, 14)
+        .frame(minWidth: title == nil && value == nil ? 52 : nil)
         .frame(height: ToolbarMetrics.controlHeight)
         .background(
             RoundedRectangle(cornerRadius: ToolbarMetrics.cornerRadius)
@@ -1503,12 +1748,12 @@ private struct ListeningSetupSheet: View {
                             }
 
                             VStack(alignment: .leading, spacing: 6) {
-                                Text("Start a Listening Session")
+                                Text(SL("Start a Listening Session"))
                                     .font(.title2)
                                     .fontWeight(.semibold)
                                     .foregroundStyle(.primary)
 
-                                Text("Choose the input language, decide whether to mix in your microphone, save the session as M4A, and turn translation on only when you need it.")
+                                Text(SL("Choose the input language, decide whether to mix in your microphone, save the session as M4A, and turn translation on only when you need it."))
                                     .foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
@@ -1620,7 +1865,7 @@ private struct ListeningSetupSheet: View {
                 }
 
                 HStack(alignment: .bottom) {
-                    Button("Cancel") {
+                    Button(SL("Cancel")) {
                         dismiss()
                     }
                     .buttonStyle(.bordered)
@@ -1635,7 +1880,7 @@ private struct ListeningSetupSheet: View {
                             Image(systemName: "record.circle.fill")
                                 .font(.system(size: 40, weight: .medium))
 
-                            Text("Start Listening")
+                            Text(SL("Start Listening"))
                                 .font(.system(size: 15, weight: .semibold))
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.72)

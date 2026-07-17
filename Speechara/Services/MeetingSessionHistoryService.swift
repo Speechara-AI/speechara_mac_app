@@ -442,6 +442,28 @@ final class MeetingSessionHistoryService {
         }
     }
 
+    func deleteSession(id: String) async throws {
+        let activeSession = try await resolvedAuthSession()
+        let configuration = try makeConfiguration(for: activeSession)
+
+        _ = try await performGraphQLRequest(
+            endpoint: configuration.graphQLEndpoint,
+            accessToken: activeSession.accessToken,
+            query: """
+            mutation DeleteMeetingSession($id: ID!) {
+              deleteMeetingSession(id: $id) {
+                id
+                status
+                deletedAt
+                revision
+              }
+            }
+            """,
+            variables: MeetingSessionVariables(id: id),
+            responseType: DeleteMeetingSessionResponse.self
+        )
+    }
+
     func isOutdatedRevisionError(_ error: Error) -> Bool {
         error.localizedDescription.localizedCaseInsensitiveContains("revision is outdated")
     }
@@ -666,6 +688,17 @@ private struct StartMeetingSessionResponse: Decodable {
 
 private struct UpdateMeetingSessionResponse: Decodable {
     let updateMeetingSession: MeetingSessionHistoryService.RemoteSessionResponse
+}
+
+private struct DeleteMeetingSessionResponse: Decodable {
+    let deleteMeetingSession: DeletedMeetingSessionResponse
+}
+
+private struct DeletedMeetingSessionResponse: Decodable {
+    let id: String
+    let status: String
+    let deletedAt: Date?
+    let revision: Int
 }
 
 private struct MeetingSessionStateResponse: Decodable {

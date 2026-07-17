@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct SpeecharaProfileView: View {
@@ -29,11 +30,11 @@ struct SpeecharaProfileView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Profile")
+            Text(SL("Profile"))
                 .font(.system(size: 42, weight: .bold, design: .rounded))
                 .foregroundStyle(SpeecharaProfileTheme.primaryText)
 
-            Text("Manage your Speechara account, plan, and usage.")
+            Text(SL("Manage your Speechara account, plan, and usage."))
                 .font(.system(size: 18, weight: .medium, design: .rounded))
                 .foregroundStyle(SpeecharaProfileTheme.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
@@ -94,7 +95,7 @@ struct SpeecharaProfileView: View {
                     }
                 }
             } else {
-                Text("No authenticated account is available in the current desktop session.")
+                Text(SL("No authenticated account is available in the current desktop session."))
                     .font(.system(size: 15, weight: .medium, design: .rounded))
                     .foregroundStyle(SpeecharaProfileTheme.secondaryText)
             }
@@ -119,12 +120,15 @@ struct SpeecharaProfileView: View {
                         }
                     }
 
-                    VStack(spacing: 12) {
-                        SpeecharaProfileInfoRow(
-                            title: "Current plan",
-                            value: billingSummary.displayPlanName,
-                            systemImage: "creditcard"
+                    if billingSummary.showsBillingAction {
+                        SpeecharaProfileStatusStrip(
+                            text: SL("Pro beta is free while Speechara is in beta. You will be notified before paid billing begins."),
+                            tint: Color(red: 0.17, green: 0.54, blue: 0.95)
                         )
+                    }
+
+                    VStack(spacing: 12) {
+                        SpeecharaBillingPlanRow(summary: billingSummary)
 
                         SpeecharaProfileInfoRow(
                             title: "Current period end",
@@ -164,13 +168,13 @@ struct SpeecharaProfileView: View {
 
     private var footerActions: some View {
         HStack(spacing: 12) {
-            Button("Sign out") {
+            Button(SL("Sign out")) {
                 authStore.signOut()
             }
             .buttonStyle(.bordered)
             .tint(Color.red.opacity(0.9))
 
-            Button("Refresh profile") {
+            Button(SL("Refresh profile")) {
                 Task {
                     await refreshProfileScreenData()
                 }
@@ -428,6 +432,56 @@ private struct SpeecharaProfileInfoRow: View {
     }
 }
 
+private struct SpeecharaBillingPlanRow: View {
+    let summary: SpeecharaBillingSummary
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "creditcard")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(SpeecharaProfileTheme.accent)
+                .frame(width: 18)
+
+            Text(SL("Current plan"))
+                .font(.system(size: 16, weight: .medium, design: .rounded))
+                .foregroundStyle(SpeecharaProfileTheme.secondaryText)
+
+            Spacer(minLength: 16)
+
+            Text(SL(summary.displayPlanName))
+                .font(.system(size: 16, weight: .medium, design: .rounded))
+                .foregroundStyle(SpeecharaProfileTheme.primaryText)
+                .multilineTextAlignment(.trailing)
+                .textSelection(.enabled)
+
+            if summary.showsBillingAction {
+                Button {
+                    summary.openBillingAction()
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(SL(summary.billingActionTitle))
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 10, weight: .bold))
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help(SL("Open billing in the web app"))
+            }
+        }
+        .padding(.horizontal, 16)
+        .frame(minHeight: 50)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(SpeecharaProfileTheme.subtlePanelFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(SpeecharaProfileTheme.cardBorder, lineWidth: 1)
+        )
+    }
+}
+
 private struct SpeecharaProfileStatusStrip: View {
     let text: String
     let tint: Color
@@ -619,8 +673,39 @@ private struct SpeecharaProfileLoadingCard: View {
 }
 
 private extension SpeecharaBillingSummary {
+    private static let billingURL = URL(string: "https://app.speechara.ai/billing")!
+
     var displayPlanName: String {
         subscription.planName?.nilIfEmpty ?? SL("No active plan")
+    }
+
+    var showsBillingAction: Bool {
+        let planCode = subscription.planCode?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let planName = subscription.planName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let status = subscription.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        if ["expired", "canceled", "past_due", "none"].contains(status) {
+            return true
+        }
+
+        if !usage.canUseTranscription {
+            return true
+        }
+
+        return planCode.contains("free") || planName.contains("free")
+    }
+
+    var billingActionTitle: String {
+        switch subscription.status.lowercased() {
+        case "expired", "canceled", "past_due":
+            return "Renew"
+        default:
+            return "Update"
+        }
+    }
+
+    func openBillingAction() {
+        NSWorkspace.shared.open(Self.billingURL)
     }
 
     var statusTitle: String {

@@ -1,8 +1,8 @@
 import Foundation
 
 actor MixedAudioStreamMixer {
-    private static let chunkSampleCount = 320
-    private static let chunkIntervalNanoseconds: UInt64 = 20_000_000
+    private static let chunkSampleCount = 4096
+    private static let chunkIntervalNanoseconds: UInt64 = 64_000_000
     private static let systemGain = 0.95
     private static let microphoneGain = 1.35
 

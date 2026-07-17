@@ -34,6 +34,21 @@ private enum ListeningSessionStartPrompt {
     }
 }
 
+@MainActor
+private enum ListeningMicrophonePrompt {
+    static func ask() -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = SL("Turn on microphone?")
+        alert.informativeText = SL("Without the microphone, Speechara will not capture what you say.")
+        alert.addButton(withTitle: SL("Turn On Microphone"))
+        alert.addButton(withTitle: SL("Continue Without Mic"))
+
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+}
+
 enum SourceLanguageOption: String, CaseIterable, Identifiable {
     case english
     case russian
@@ -214,12 +229,20 @@ struct DialogueEntry: Identifiable, Equatable {
     let speakerNumber: Int?
     let text: String
     let timestamp: Date
+    let isDraft: Bool
 
-    init(id: UUID = UUID(), speakerNumber: Int?, text: String, timestamp: Date = Date()) {
+    init(
+        id: UUID = UUID(),
+        speakerNumber: Int?,
+        text: String,
+        timestamp: Date = Date(),
+        isDraft: Bool = false
+    ) {
         self.id = id
         self.speakerNumber = speakerNumber
         self.text = text
         self.timestamp = timestamp
+        self.isDraft = isDraft
     }
 }
 
@@ -312,6 +335,7 @@ final class SubtitleViewModel: ObservableObject {
     @Published var selectedMicrophoneID = ""
     @Published private(set) var isSystemAudioListening = false
     @Published private(set) var isMicrophoneListening = false
+    @Published private(set) var shouldShowMicrophoneOffWarning = false
     @Published private(set) var isMicrophoneTesting = false
     @Published private(set) var isMicrophoneBusy = false
     @Published private(set) var microphoneLevel = 0.0
@@ -352,7 +376,8 @@ final class SubtitleViewModel: ObservableObject {
     private let localAudioRecordingService = LocalAudioRecordingService()
     private let mixedAudioStreamMixer = MixedAudioStreamMixer()
     private let liveDeepgramService = DeepgramLiveTranscriptionService()
-    private let deepSeekTranslationService = DeepSeekTranslationService()
+    private let liveTranslationService = DeepSeekTranslationService()
+    private let finalTranslationService = DeepSeekTranslationService()
     private let deepSeekSummaryService = DeepSeekSummaryService()
     private let deepSeekMeetingProtocolService = DeepSeekMeetingProtocolService()
     private let deepSeekAnswerAssistService = DeepSeekAnswerAssistService()
@@ -613,9 +638,11 @@ final class SubtitleViewModel: ObservableObject {
         translationPreviewTurnID = nil
         translationMessage = "Live translation was turned off because the source and target languages cannot match."
 
-        let translationService = deepSeekTranslationService
+        let liveTranslationService = self.liveTranslationService
+        let finalTranslationService = self.finalTranslationService
         Task {
-            await translationService.resetSession()
+            await liveTranslationService.resetSession()
+            await finalTranslationService.resetSession()
         }
     }
 
@@ -689,7 +716,11 @@ final class SubtitleViewModel: ObservableObject {
         }
 
         let startMode = ListeningSessionStartPrompt.ask()
-        startListening(mode: startMode, includeMicrophone: includeMicrophone)
+        let shouldIncludeMicrophone = includeMicrophone || ListeningMicrophonePrompt.ask()
+        if shouldIncludeMicrophone {
+            startsWithMicrophoneEnabled = true
+        }
+        startListening(mode: startMode, includeMicrophone: shouldIncludeMicrophone)
     }
 
     func startListening(includeMicrophone: Bool = false) {
@@ -741,6 +772,7 @@ final class SubtitleViewModel: ObservableObject {
         try await systemAudioCaptureService.startCapture(recordAudio: false)
         isSystemAudioListening = true
         status = .listening
+        shouldShowMicrophoneOffWarning = !includeMicrophone
         meetingHistoryStartedAt = meetingHistoryStartedAt ?? Date()
         meetingHistorySource = includeMicrophone ? "system_audio+microphone" : "system_audio"
         markBillingUsageStartedIfNeeded()
@@ -753,6 +785,7 @@ final class SubtitleViewModel: ObservableObject {
                 await mixedAudioStreamMixer.setMicrophoneEnabled(false)
                 stopMicrophoneCaptureIfPossible(force: true)
                 isMicrophoneListening = false
+                shouldShowMicrophoneOffWarning = true
                 updateMicrophoneLiveHandler()
                 errorMessage = error.localizedDescription
             }
@@ -874,10 +907,12 @@ final class SubtitleViewModel: ObservableObject {
             if isMicrophoneListening {
                 await mixedAudioStreamMixer.setMicrophoneEnabled(false)
                 isMicrophoneListening = false
+                shouldShowMicrophoneOffWarning = isSystemAudioListening
                 updateMicrophoneLiveHandler()
                 stopMicrophoneCaptureIfPossible()
 
                 if !isSystemAudioListening {
+                    shouldShowMicrophoneOffWarning = false
                     await stopStreamingSession(markStopped: true)
                 } else {
                     status = .listening
@@ -1036,6 +1071,7 @@ final class SubtitleViewModel: ObservableObject {
         lastRecordingPath = nil
         errorMessage = nil
         translationMessage = nil
+        shouldShowMicrophoneOffWarning = false
         status = .idle
     }
 
@@ -1352,7 +1388,9 @@ final class SubtitleViewModel: ObservableObject {
         scheduleDraftAutosave()
 
         Task {
-            await deepSeekTranslationService.replaceHistory(with: translationHistoryTurns())
+            let history = translationHistoryTurns()
+            await liveTranslationService.replaceHistory(with: history)
+            await finalTranslationService.replaceHistory(with: history)
         }
     }
 
@@ -1558,10 +1596,26 @@ final class SubtitleViewModel: ObservableObject {
     private func applyDeepgramEvent(_ event: DeepgramTranscriptEvent) {
         switch event {
         case .interim(let result):
-            liveSubtitlePreview = result.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            applyInterimTranscript(result.transcript)
         case .final(let result):
             liveSubtitlePreview = ""
             applyFinalTranscript(result.transcript, speechFinal: result.speechFinal)
+        }
+    }
+
+    private func applyInterimTranscript(_ transcript: String) {
+        let normalizedTranscript = normalizedTranscriptFragment(transcript)
+        liveSubtitlePreview = normalizedTranscript
+
+        guard isTranslationAvailable, !normalizedTranscript.isEmpty else {
+            return
+        }
+
+        let turnID = ensureOpenTurn()
+        let confirmedText = sessionTurns.first(where: { $0.id == turnID })?.text ?? ""
+        let completeDraft = mergedText(existing: confirmedText, addition: normalizedTranscript)
+        Task {
+            await liveTranslationService.enqueueInterimChunk(completeDraft, turnID: turnID)
         }
     }
 
@@ -1569,7 +1623,7 @@ final class SubtitleViewModel: ObservableObject {
         let normalizedTranscript = normalizedTranscriptFragment(transcript)
         guard !normalizedTranscript.isEmpty else {
             if speechFinal {
-                finalizeCurrentTurnIfNeeded(force: true)
+                finalizeCurrentTurnIfNeeded()
             }
             return
         }
@@ -1579,7 +1633,7 @@ final class SubtitleViewModel: ObservableObject {
 
         guard !delta.isEmpty else {
             if speechFinal {
-                finalizeCurrentTurnIfNeeded(force: true)
+                finalizeCurrentTurnIfNeeded()
             }
             return
         }
@@ -1589,14 +1643,17 @@ final class SubtitleViewModel: ObservableObject {
         rebuildPublishedState()
         scheduleDraftAutosave()
 
-        if isTranslationAvailable {
+        let closesTurn = speechFinal || shouldFinalizeTurn(afterAppending: delta)
+
+        if isTranslationAvailable, !closesTurn {
+            let fullTurnText = sessionTurns.first(where: { $0.id == turnID })?.text ?? delta
             Task {
-                await deepSeekTranslationService.enqueueFinalChunk(delta, turnID: turnID)
+                await liveTranslationService.enqueueInterimChunk(fullTurnText, turnID: turnID)
             }
         }
 
-        if speechFinal || shouldFinalizeTurn(afterAppending: delta) {
-            finalizeCurrentTurnIfNeeded(force: true)
+        if closesTurn {
+            finalizeCurrentTurnIfNeeded()
         }
     }
 
@@ -1695,7 +1752,7 @@ final class SubtitleViewModel: ObservableObject {
         return [".", "!", "?", "…"].contains(lastCharacter)
     }
 
-    private func finalizeCurrentTurnIfNeeded(force: Bool) {
+    private func finalizeCurrentTurnIfNeeded() {
         guard let lastIndex = sessionTurns.indices.last, !sessionTurns[lastIndex].isClosed else {
             lastDeepgramFinalTranscript = ""
             return
@@ -1711,42 +1768,61 @@ final class SubtitleViewModel: ObservableObject {
 
         sessionTurns[lastIndex].text = trimmedText
         sessionTurns[lastIndex].isClosed = true
+
+        if isTranslationAvailable {
+            let turnID = sessionTurns[lastIndex].id
+            Task {
+                await finalTranslationService.enqueueFinalChunk(trimmedText, turnID: turnID)
+            }
+        }
+
         lastDeepgramFinalTranscript = ""
         rebuildPublishedState()
         scheduleDraftAutosave()
         scheduleStableReconstructionIfNeeded()
 
-        if force {
-            translationPreviewTurnID = nil
-            liveTranslationPreview = ""
-        }
+        // Keep the latest draft visible until the final translation replaces it.
     }
 
     private func prepareTranslationIfPossible() async {
         guard isTranslationEnabled else {
             isTranslationAvailable = false
             translationMessage = nil
-            await deepSeekTranslationService.resetSession()
+            await liveTranslationService.resetSession()
+            await finalTranslationService.resetSession()
             return
         }
 
+        let eventHandler: @Sendable (DeepSeekTranslationEvent) -> Void = { [weak self] event in
+            Task { @MainActor in
+                self?.applyTranslationEvent(event)
+            }
+        }
+
         do {
-            try await deepSeekTranslationService.startSession(
+            try await liveTranslationService.startSession(
                 sourceLanguageCode: selectedSourceLanguage.deepgramLanguageCode,
                 sourceLanguageName: selectedSourceLanguage.deepSeekLanguageName,
                 targetLanguageCode: selectedTranslationLanguage.languageCode,
                 targetLanguageName: selectedTranslationLanguage.deepSeekTargetLanguageName,
-                eventHandler: { [weak self] event in
-                    Task { @MainActor in
-                        self?.applyTranslationEvent(event)
-                    }
-                }
+                eventHandler: eventHandler
+            )
+            try await finalTranslationService.startSession(
+                sourceLanguageCode: selectedSourceLanguage.deepgramLanguageCode,
+                sourceLanguageName: selectedSourceLanguage.deepSeekLanguageName,
+                targetLanguageCode: selectedTranslationLanguage.languageCode,
+                targetLanguageName: selectedTranslationLanguage.deepSeekTargetLanguageName,
+                eventHandler: eventHandler
             )
             isTranslationAvailable = true
             translationMessage = nil
             liveTranslationPreview = ""
-            await deepSeekTranslationService.replaceHistory(with: translationHistoryTurns())
+            let history = translationHistoryTurns()
+            await liveTranslationService.replaceHistory(with: history)
+            await finalTranslationService.replaceHistory(with: history)
         } catch {
+            await liveTranslationService.resetSession()
+            await finalTranslationService.resetSession()
             isTranslationAvailable = false
             translationMessage = SLF("%@ translation is unavailable: %@", selectedTranslationLanguage.displayName, error.localizedDescription)
             liveTranslationPreview = ""
@@ -1784,6 +1860,7 @@ final class SubtitleViewModel: ObservableObject {
         try await startMicrophoneCaptureIfNeeded()
         await mixedAudioStreamMixer.setMicrophoneEnabled(true)
         isMicrophoneListening = true
+        shouldShowMicrophoneOffWarning = false
         isMicrophoneTesting = false
         updateMicrophoneLiveHandler()
         status = .listening
@@ -1925,6 +2002,7 @@ final class SubtitleViewModel: ObservableObject {
         resetMicrophoneService()
         isMicrophoneCaptureActive = false
         isMicrophoneListening = false
+        shouldShowMicrophoneOffWarning = false
         isMicrophoneTesting = false
         microphoneLevel = 0
         microphoneSignalDetected = false
@@ -1961,8 +2039,10 @@ final class SubtitleViewModel: ObservableObject {
         }
 
         await liveDeepgramService.stop()
-        finalizeCurrentTurnIfNeeded(force: true)
-        await deepSeekTranslationService.resetSession()
+        commitPendingTranslationDrafts()
+        finalizeCurrentTurnIfNeeded()
+        await liveTranslationService.resetSession()
+        await finalTranslationService.resetSession()
         await mixedAudioStreamMixer.reset()
         isTranslationAvailable = false
         isStreamingSessionPrepared = false
@@ -1988,7 +2068,8 @@ final class SubtitleViewModel: ObservableObject {
         systemAudioCaptureService.setLiveAudioDataHandler(nil)
         resetMicrophoneService()
         await liveDeepgramService.stop()
-        await deepSeekTranslationService.resetSession()
+        await liveTranslationService.resetSession()
+        await finalTranslationService.resetSession()
         await localAudioRecordingService.cancel()
         await mixedAudioStreamMixer.reset()
         isTranslationAvailable = false
@@ -2018,6 +2099,11 @@ final class SubtitleViewModel: ObservableObject {
     private func applyTranslationEvent(_ event: DeepSeekTranslationEvent) {
         switch event {
         case .preview(let turnID, let translation):
+            if let turn = sessionTurns.first(where: { $0.id == turnID }),
+               turn.isClosed,
+               !turn.translationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return
+            }
             pendingTranslationDrafts[turnID] = translation
             translationPreviewTurnID = turnID
             liveTranslationPreview = translation
@@ -2026,8 +2112,8 @@ final class SubtitleViewModel: ObservableObject {
             pendingTranslationDrafts.removeValue(forKey: turnID)
             if translationPreviewTurnID == turnID {
                 translationPreviewTurnID = nil
+                liveTranslationPreview = ""
             }
-            liveTranslationPreview = ""
             applyCompletedTranslationChunk(translation, to: turnID)
         case .failed(let message):
             if let translationPreviewTurnID {
@@ -2040,7 +2126,8 @@ final class SubtitleViewModel: ObservableObject {
             rebuildPublishedState()
 
             Task {
-                await deepSeekTranslationService.resetSession()
+                await liveTranslationService.resetSession()
+                await finalTranslationService.resetSession()
             }
         }
     }
@@ -2050,10 +2137,38 @@ final class SubtitleViewModel: ObservableObject {
             return
         }
 
-        sessionTurns[index].translationText = mergedText(
-            existing: sessionTurns[index].translationText,
-            addition: translation
-        )
+        sessionTurns[index].translationText = translation.trimmingCharacters(in: .whitespacesAndNewlines)
+        rebuildPublishedState()
+        scheduleDraftAutosave()
+
+        let history = translationHistoryTurns()
+        Task {
+            await liveTranslationService.replaceHistory(with: history)
+            await finalTranslationService.replaceHistory(with: history)
+        }
+    }
+
+    private func commitPendingTranslationDrafts() {
+        guard !pendingTranslationDrafts.isEmpty else {
+            return
+        }
+
+        for (turnID, draft) in pendingTranslationDrafts {
+            let trimmedDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedDraft.isEmpty,
+                  let index = sessionTurns.firstIndex(where: { $0.id == turnID }) else {
+                continue
+            }
+
+            sessionTurns[index].translationText = mergedText(
+                existing: sessionTurns[index].translationText,
+                addition: trimmedDraft
+            )
+        }
+
+        pendingTranslationDrafts.removeAll()
+        translationPreviewTurnID = nil
+        liveTranslationPreview = ""
         rebuildPublishedState()
         scheduleDraftAutosave()
     }
@@ -2107,11 +2222,16 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     private func rebuildPublishedState() {
-        transcriptEntries = sessionTurns.map { turn in
-            DialogueEntry(
+        transcriptEntries = sessionTurns.compactMap { turn in
+            let text = turn.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                return nil
+            }
+
+            return DialogueEntry(
                 id: turn.id,
                 speakerNumber: speakerNumber(for: turn.speakerLabel),
-                text: turn.text,
+                text: text,
                 timestamp: turn.timestamp
             )
         }
@@ -2126,7 +2246,8 @@ final class SubtitleViewModel: ObservableObject {
                 id: turn.id,
                 speakerNumber: speakerNumber(for: turn.translationSpeakerLabel ?? turn.speakerLabel),
                 text: visibleTranslation,
-                timestamp: turn.timestamp
+                timestamp: turn.timestamp,
+                isDraft: pendingTranslationDrafts[turn.id] != nil
             )
         }
 
@@ -2304,7 +2425,9 @@ final class SubtitleViewModel: ObservableObject {
             rebuildPublishedState()
             scheduleDraftAutosave()
             if isTranslationAvailable {
-                await deepSeekTranslationService.replaceHistory(with: translationHistoryTurns())
+                let history = translationHistoryTurns()
+                await liveTranslationService.replaceHistory(with: history)
+                await finalTranslationService.replaceHistory(with: history)
             }
         } catch {
             return
@@ -2431,7 +2554,7 @@ final class SubtitleViewModel: ObservableObject {
         }
         .joined(separator: "\n")
 
-        let translatedBlock = try await deepSeekTranslationService.translateStableBlock(sourceBlock, history: [])
+        let translatedBlock = try await finalTranslationService.translateStableBlock(sourceBlock, history: [])
         let translatedLines = parseTranslatedStableLines(from: translatedBlock)
         guard translatedLines.count == turns.count else {
             return turns

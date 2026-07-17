@@ -103,7 +103,7 @@ private struct PermissionsOnboardingView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Prepare Speechara for live capture")
+                    Text(SL("Prepare Speechara for live capture"))
                         .font(.system(size: 40, weight: .bold, design: .rounded))
 
                     Text("Speechara captures system audio directly, without screen recording. Microphone access is optional for adding your own voice.")
@@ -185,7 +185,7 @@ private struct PermissionsOnboardingView: View {
     private var benefitsCard: some View {
         InsightCard(accent: Color(red: 0.89, green: 0.57, blue: 0.20).opacity(0.20)) {
             VStack(alignment: .leading, spacing: 16) {
-                Text("What turns on after setup")
+                Text(SL("What turns on after setup"))
                     .font(.headline)
 
                 BenefitRow(
@@ -215,7 +215,7 @@ private struct PermissionsOnboardingView: View {
     private var stepsCard: some View {
         InsightCard {
             VStack(alignment: .leading, spacing: 14) {
-                Text("Quick path")
+                Text(SL("Quick path"))
                     .font(.headline)
 
                 StepRow(
@@ -230,13 +230,13 @@ private struct PermissionsOnboardingView: View {
     private var footerActions: some View {
         VStack(alignment: .leading, spacing: 14) {
             if !permissionsController.microphoneState.isGranted {
-                Text("You can skip this once. Speechara will ask for microphone access later only if you enable microphone mix-in.")
+                Text(SL("You can skip this once. Speechara will ask for microphone access later only if you enable microphone mix-in."))
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
             }
 
             HStack(spacing: 14) {
-                Button("Continue later") {
+                Button(SL("Continue later")) {
                     onContinue()
                 }
                 .buttonStyle(.bordered)

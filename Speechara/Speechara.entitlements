@@ -10,5 +10,10 @@
 	<true/>
 	<key>com.apple.security.network.server</key>
 	<true/>
+	<key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
+	<array>
+		<string>ai.speechara.mac-spks</string>
+		<string>ai.speechara.mac-spki</string>
+	</array>
 </dict>
 </plist>

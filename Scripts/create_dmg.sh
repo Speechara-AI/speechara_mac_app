@@ -11,7 +11,7 @@ PRODUCT_NAME="${PRODUCT_NAME:-Speechara}"
 VOLUME_NAME="${VOLUME_NAME:-${PRODUCT_NAME}}"
 DMG_NAME="${DMG_NAME:-${PRODUCT_NAME}}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/build/dmg}"
-DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-${OUTPUT_DIR}/DerivedData}"
+DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-${OUTPUT_DIR}/DerivedData.noindex}"
 
 APP_PATH="${APP_PATH:-}"
 CUSTOM_BACKGROUND_PATH=""
@@ -111,6 +111,7 @@ notarytool_auth_args() {
 sign_app_for_notarization() {
   local app_path="$1"
   local embedded_profile_path="${app_path}/Contents/embedded.provisionprofile"
+  local sparkle_framework_path="${app_path}/Contents/Frameworks/Sparkle.framework"
 
   if [ ! -f "${ENTITLEMENTS_PATH}" ]; then
     fail "Entitlements file not found at ${ENTITLEMENTS_PATH}"
@@ -121,10 +122,31 @@ sign_app_for_notarization() {
     rm -f "${embedded_profile_path}"
   fi
 
+  if [ -d "${sparkle_framework_path}" ]; then
+    echo "Signing Sparkle helper tools with ${SIGN_IDENTITY}"
+
+    if [ -d "${sparkle_framework_path}/Versions/B/XPCServices/Installer.xpc" ]; then
+      codesign --force --options runtime --timestamp --sign "${SIGN_IDENTITY}" "${sparkle_framework_path}/Versions/B/XPCServices/Installer.xpc"
+    fi
+
+    if [ -d "${sparkle_framework_path}/Versions/B/XPCServices/Downloader.xpc" ]; then
+      codesign --force --options runtime --timestamp --preserve-metadata=entitlements --sign "${SIGN_IDENTITY}" "${sparkle_framework_path}/Versions/B/XPCServices/Downloader.xpc"
+    fi
+
+    if [ -e "${sparkle_framework_path}/Versions/B/Autoupdate" ]; then
+      codesign --force --options runtime --timestamp --sign "${SIGN_IDENTITY}" "${sparkle_framework_path}/Versions/B/Autoupdate"
+    fi
+
+    if [ -d "${sparkle_framework_path}/Versions/B/Updater.app" ]; then
+      codesign --force --options runtime --timestamp --sign "${SIGN_IDENTITY}" "${sparkle_framework_path}/Versions/B/Updater.app"
+    fi
+
+    codesign --force --options runtime --timestamp --sign "${SIGN_IDENTITY}" "${sparkle_framework_path}"
+  fi
+
   echo "Signing ${app_path} with ${SIGN_IDENTITY}"
   codesign \
     --force \
-    --deep \
     --options runtime \
     --timestamp \
     --entitlements "${ENTITLEMENTS_PATH}" \
@@ -150,11 +172,82 @@ notarize_app() {
   ditto -c -k --keepParent "${app_path}" "${archive_path}"
 
   echo "Submitting ${APP_BUNDLE_NAME} to Apple notarization service and waiting for completion"
-  xcrun notarytool submit "${archive_path}" --wait "${auth_args[@]}"
+  local notary_output=""
+  local submission_id=""
+  local submission_info=""
+  local submission_status=""
+
+  if ! notary_output="$(xcrun notarytool submit "${archive_path}" --wait "${auth_args[@]}" 2>&1)"; then
+    printf '%s\n' "${notary_output}" >&2
+    submission_id="$(printf '%s\n' "${notary_output}" | awk '/^[[:space:]]*id: / { print $2; exit }')"
+
+    if [ -z "${submission_id}" ]; then
+      fail "Notarization failed before a submission id was returned."
+    fi
+
+    echo "notarytool returned an error after upload; checking submission ${submission_id}"
+    if ! submission_info="$(xcrun notarytool info "${submission_id}" "${auth_args[@]}" 2>&1)"; then
+      printf '%s\n' "${submission_info}" >&2
+      fail "Unable to verify notarization submission ${submission_id} after notarytool returned an error."
+    fi
+
+    printf '%s\n' "${submission_info}"
+    submission_status="$(printf '%s\n' "${submission_info}" | awk -F': ' '/^[[:space:]]*status: / { print $2; exit }')"
+    if [ "${submission_status}" != "Accepted" ]; then
+      fail "Notarization submission ${submission_id} finished with status ${submission_status:-unknown}."
+    fi
+  else
+    printf '%s\n' "${notary_output}"
+  fi
 
   echo "Stapling notarization ticket to ${APP_BUNDLE_NAME}"
   xcrun stapler staple "${app_path}"
   rm -f "${archive_path}"
+}
+
+notarize_dmg() {
+  local dmg_path="$1"
+  local auth_output=""
+  local auth_args=()
+  local notary_output=""
+  local submission_id=""
+  local submission_info=""
+  local submission_status=""
+
+  if ! auth_output="$(notarytool_auth_args)"; then
+    fail "No notarization credentials configured. Run 'xcrun notarytool store-credentials speechara-notary ...' and pass --notary-profile speechara-notary, or set NOTARY_APPLE_ID, NOTARY_TEAM_ID, and NOTARY_PASSWORD."
+  fi
+  while IFS= read -r auth_arg; do
+    auth_args+=("${auth_arg}")
+  done <<< "${auth_output}"
+
+  echo "Submitting $(basename "${dmg_path}") to Apple notarization service and waiting for completion"
+  if ! notary_output="$(xcrun notarytool submit "${dmg_path}" --wait "${auth_args[@]}" 2>&1)"; then
+    printf '%s\n' "${notary_output}" >&2
+    submission_id="$(printf '%s\n' "${notary_output}" | awk '/^[[:space:]]*id: / { print $2; exit }')"
+
+    if [ -z "${submission_id}" ]; then
+      fail "DMG notarization failed before a submission id was returned."
+    fi
+
+    echo "notarytool returned an error after upload; checking submission ${submission_id}"
+    if ! submission_info="$(xcrun notarytool info "${submission_id}" "${auth_args[@]}" 2>&1)"; then
+      printf '%s\n' "${submission_info}" >&2
+      fail "Unable to verify DMG notarization submission ${submission_id} after notarytool returned an error."
+    fi
+
+    printf '%s\n' "${submission_info}"
+    submission_status="$(printf '%s\n' "${submission_info}" | awk -F': ' '/^[[:space:]]*status: / { print $2; exit }')"
+    if [ "${submission_status}" != "Accepted" ]; then
+      fail "DMG notarization submission ${submission_id} finished with status ${submission_status:-unknown}."
+    fi
+  else
+    printf '%s\n' "${notary_output}"
+  fi
+
+  echo "Stapling notarization ticket to $(basename "${dmg_path}")"
+  xcrun stapler staple "${dmg_path}"
+  xcrun stapler validate "${dmg_path}"
 }
 
 prepare_app_for_distribution() {
@@ -441,6 +534,13 @@ hdiutil convert \
   -imagekey zlib-level=9 \
   -o \
   "${FINAL_DMG_PATH}" >/dev/null
+
+if [ "${SKIP_NOTARIZATION}" -eq 0 ] && [ -n "${SIGN_IDENTITY}" ]; then
+  echo "Signing ${FINAL_DMG_PATH} with ${SIGN_IDENTITY}"
+  codesign --force --timestamp --sign "${SIGN_IDENTITY}" "${FINAL_DMG_PATH}"
+  codesign --verify --verbose=2 "${FINAL_DMG_PATH}"
+  notarize_dmg "${FINAL_DMG_PATH}"
+fi
 
 if [ "${REVEAL_OUTPUT}" -eq 1 ]; then
   reveal_in_finder "${FINAL_DMG_PATH}"

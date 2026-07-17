@@ -1,5 +1,75 @@
 # Speechara macOS Version History
 
+## 1.1.0 - 2026-07-17
+
+### Added
+- Added synchronized live draft translation that appears together with the interim transcript and is replaced by the final corrected translation.
+- Added automatic recovery for interrupted transcription and translation connections without stopping the active meeting session.
+- Added session continuation prompts and microphone guidance when listening starts.
+
+### Changed
+- Moved interim speech directly into the main transcript and translation panels, with draft text shown in a secondary color until finalized.
+- Separated live and final translation processing so final corrections cannot block the current live translation.
+- Kept transcription and translation focused on the newest speech while preserving finalized meeting content.
+- Made the floating mini window available only during active listening and only when the main Speechara window is minimized or fully covered.
+
+### Fixed
+- Fixed transcription and translation backlogs that could continue processing minutes after a meeting ended.
+- Fixed live translation stalls, skipped phrases, stale responses, and automatic recovery after timeouts or socket disconnects.
+- Fixed the main and floating Speechara windows appearing at the same time.
+- Fixed floating-window detection when Speechara is covered by browsers, Microsoft Word, or Webex.
+- Fixed a crash when starting listening from the meeting-detected notification.
+
+## 1.0.17 - 2026-07-07
+
+### Added
+- Added live pipeline diagnostics for Deepgram audio streaming and live translation queues.
+- Added an optional setting to disable the floating mini window.
+- Added billing actions for updating Free plans and renewing expired plans during the beta period.
+
+### Changed
+- Kept live transcription near real time by bounding audio and translation backlogs under downstream slowdowns.
+- Replaced the translation language toolbar abbreviation with a translation icon.
+- Expanded interface localization coverage across workspace, profile, history, settings, authentication, and billing views.
+
+### Fixed
+- Fixed mini-window transcript and translation autoscroll.
+- Fixed the mini window appearing when changing the app interface language.
+- Fixed text clipping at the bottom of mini-window transcript panels.
+- Fixed the microphone-off warning so it appears only when the microphone is disabled during an active session.
+- Localized previously English-only New and Focus controls in non-English interfaces.
+
+## 1.0.16 - 2026-07-01
+
+### Fixed
+- Enabled the Sparkle installer launcher service for sandboxed macOS updates.
+- Added the required Sparkle installer communication entitlements.
+- Preserved Sparkle helper signing requirements in Developer ID release builds.
+
+## 1.0.15 - 2026-06-30
+
+### Fixed
+- Restored the sidebar Update button when a newer Sparkle update is available.
+- Added a delayed startup update refresh so Sparkle can report available updates after launch.
+
+## 1.0.14 - 2026-06-30
+
+### Fixed
+- Notarized and stapled the DMG container for website downloads.
+- Published the update under a fresh versioned URL to avoid CDN cache drift.
+
+## 1.0.13 - 2026-06-30
+
+### Fixed
+- Refreshed the macOS update package under a new versioned URL.
+- Signed the DMG container in addition to the notarized app bundle.
+
+## 1.0.12 - 2026-06-30
+
+### Fixed
+- Reposted the macOS update as a signed and notarized website release.
+- Refreshed Sparkle update metadata so installed apps can update to the latest build.
+
 ## 1.0.11 - 2026-06-03
 
 ### Fixed

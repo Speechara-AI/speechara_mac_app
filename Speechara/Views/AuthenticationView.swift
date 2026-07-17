@@ -88,10 +88,10 @@ struct AuthenticationView: View {
 
     private var header: some View {
         VStack(spacing: 10) {
-            Text("Sign In")
+            Text(SL("Sign In"))
                 .font(.system(size: 44, weight: .semibold, design: .serif))
 
-            Text("Use Google, Microsoft, Apple, or a Speechara email/password account.")
+            Text(SL("Use Google, Microsoft, Apple, or a Speechara email/password account."))
                 .font(.system(size: 16, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -246,7 +246,7 @@ struct AuthenticationView: View {
                 .buttonStyle(.plain)
                 .disabled(authStore.isAuthenticating)
 
-                Button("Resend") {
+                Button(SL("Resend")) {
                     resendRegistrationCode(challenge)
                 }
                 .buttonStyle(.link)
@@ -343,7 +343,7 @@ struct AuthenticationView: View {
                 .buttonStyle(.plain)
                 .disabled(authStore.isAuthenticating)
 
-                Button("Back") {
+                Button(SL("Back")) {
                     emailFlow = .signIn
                     mfaCode = ""
                     clearMessages()
@@ -371,7 +371,7 @@ struct AuthenticationView: View {
                 )
 
                 if provider != .email {
-                    Button("Cancel sign-in") {
+                    Button(SL("Cancel sign-in")) {
                         authStore.cancelAuthentication()
                     }
                     .buttonStyle(.link)
@@ -382,10 +382,10 @@ struct AuthenticationView: View {
 
     private var footer: some View {
         HStack(spacing: 8) {
-            Text("By continuing, you allow Speechara to create a desktop session for your account.")
+            Text(SL("By continuing, you allow Speechara to create a desktop session for your account."))
                 .foregroundStyle(.secondary)
 
-            Button("Auth settings") {
+            Button(SL("Auth settings")) {
                 openWindow(id: "speechara-settings")
             }
             .buttonStyle(.link)
@@ -704,7 +704,7 @@ struct AuthenticationLoadingView: View {
                 ProgressView()
                     .controlSize(.large)
 
-                Text("Restoring your session...")
+                Text(SL("Restoring your session…"))
                     .font(.system(size: 20, weight: .semibold, design: .rounded))
             }
         }

@@ -13,6 +13,8 @@ final class SpeecharaUpdateController: NSObject, ObservableObject, SPUUpdaterDel
         userDriverDelegate: nil
     )
 
+    private var didScheduleStartupRefresh = false
+
     var isUpdateAvailable: Bool {
         availableUpdateDisplayVersion != nil
     }
@@ -24,6 +26,14 @@ final class SpeecharaUpdateController: NSObject, ObservableObject, SPUUpdaterDel
     func activate() {
         _ = updaterController
         refreshUpdateAvailability()
+
+        guard !didScheduleStartupRefresh else { return }
+        didScheduleStartupRefresh = true
+
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            self?.refreshUpdateAvailability()
+        }
     }
 
     func checkForUpdates() {

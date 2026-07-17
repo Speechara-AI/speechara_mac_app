@@ -181,6 +181,16 @@ struct SpeecharaWorkspaceShellView: View {
 
             Spacer(minLength: 0)
 
+#if !APP_STORE
+            if updateController.isUpdateAvailable {
+                SpeecharaSidebarUpdateButton {
+                    updateController.checkForUpdates()
+                }
+                .padding(.horizontal, 10)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+#endif
+
             if let user = authStore.currentUser {
                 VStack(spacing: 10) {
                     SpeecharaSidebarAvatar(

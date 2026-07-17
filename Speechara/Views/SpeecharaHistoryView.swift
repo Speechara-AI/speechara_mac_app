@@ -81,6 +81,7 @@ private enum SpeecharaHistoryDetailTab: String, CaseIterable, Identifiable {
 
 struct SpeecharaHistoryView: View {
     @StateObject private var viewModel = SpeecharaHistoryViewModel()
+    @State private var pendingDeleteSession: MeetingSessionHistoryListItem?
 
     var body: some View {
         ScrollView {
@@ -99,16 +100,41 @@ struct SpeecharaHistoryView: View {
         .sheet(isPresented: $viewModel.isDetailPresented, onDismiss: viewModel.dismissDetail) {
             SpeecharaHistoryDetailSheet(viewModel: viewModel)
         }
+        .alert(
+            "Delete session?",
+            isPresented: Binding(
+                get: { pendingDeleteSession != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        pendingDeleteSession = nil
+                    }
+                }
+            ),
+            presenting: pendingDeleteSession
+        ) { item in
+            Button("Delete", role: .destructive) {
+                Task {
+                    await viewModel.deleteSession(item)
+                    pendingDeleteSession = nil
+                }
+            }
+
+            Button("Cancel", role: .cancel) {
+                pendingDeleteSession = nil
+            }
+        } message: { item in
+            Text(SLF("This will remove “%@” from your history.", item.resolvedTitle))
+        }
     }
 
     private var header: some View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 10) {
-                Text("History")
+                Text(SL("History"))
                     .font(.system(size: 42, weight: .bold, design: .rounded))
                     .foregroundStyle(SpeecharaHistoryTheme.primaryText)
 
-                Text("Review your saved meetings, transcripts, translations, summaries, and follow-up notes.")
+                Text(SL("Review your saved meetings, transcripts, translations, summaries, and follow-up notes."))
                     .font(.system(size: 18, weight: .medium, design: .rounded))
                     .foregroundStyle(SpeecharaHistoryTheme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -180,11 +206,14 @@ struct SpeecharaHistoryView: View {
                 ForEach(viewModel.sessions) { item in
                     SpeecharaHistorySessionCard(
                         item: item,
-                        isOpening: viewModel.isLoadingDetail && viewModel.selectedSessionSummary?.id == item.id
+                        isOpening: viewModel.isLoadingDetail && viewModel.selectedSessionSummary?.id == item.id,
+                        isDeleting: viewModel.deletingSessionID == item.id
                     ) {
                         Task {
                             await viewModel.openSession(item)
                         }
+                    } deleteAction: {
+                        pendingDeleteSession = item
                     }
                 }
 
@@ -253,6 +282,7 @@ final class SpeecharaHistoryViewModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var isLoadingMore = false
     @Published private(set) var errorMessage: String?
+    @Published private(set) var deletingSessionID: String?
 
     @Published private(set) var selectedSessionSummary: MeetingSessionHistoryListItem?
     @Published private(set) var selectedSessionDetail: MeetingSessionHistoryDetail?
@@ -347,6 +377,30 @@ final class SpeecharaHistoryViewModel: ObservableObject {
         }
 
         await openSession(selectedSessionSummary)
+    }
+
+    func deleteSession(_ item: MeetingSessionHistoryListItem) async {
+        guard deletingSessionID == nil else {
+            return
+        }
+
+        deletingSessionID = item.id
+        defer {
+            deletingSessionID = nil
+        }
+
+        do {
+            try await historyService.deleteSession(id: item.id)
+            sessions.removeAll { $0.id == item.id }
+
+            if selectedSessionSummary?.id == item.id || selectedSessionDetail?.id == item.id {
+                dismissDetail()
+            }
+
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     func copySelectedTranscriptToPasteboard() {
@@ -558,15 +612,23 @@ final class SpeecharaHistoryViewModel: ObservableObject {
 private struct SpeecharaHistorySessionCard: View {
     let item: MeetingSessionHistoryListItem
     let isOpening: Bool
+    let isDeleting: Bool
     let openAction: () -> Void
+    let deleteAction: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 18) {
             VStack(alignment: .leading, spacing: 14) {
-                Text(item.resolvedTitle)
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
-                    .foregroundStyle(SpeecharaHistoryTheme.primaryText)
-                    .lineLimit(2)
+                Button(action: openAction) {
+                    Text(item.resolvedTitle)
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                        .foregroundStyle(SpeecharaHistoryTheme.primaryText)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .disabled(isOpening || isDeleting)
+                .help(SL("Open"))
 
                 HStack(spacing: 8) {
                     SpeecharaHistoryMetaPill(
@@ -675,6 +737,36 @@ private struct SpeecharaHistorySessionCard: View {
                     )
                 }
                 .buttonStyle(.plain)
+                .disabled(isOpening || isDeleting)
+
+                Button(action: deleteAction) {
+                    HStack(spacing: 8) {
+                        if isDeleting {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(Color(red: 0.96, green: 0.28, blue: 0.34))
+                        } else {
+                            Image(systemName: "trash")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+
+                        Text(isDeleting ? SL("Deleting…") : SL("Delete"))
+                            .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    }
+                    .foregroundStyle(Color(red: 0.96, green: 0.28, blue: 0.34))
+                    .padding(.horizontal, 16)
+                    .frame(height: 42)
+                    .background(
+                        Capsule()
+                            .fill(Color(red: 1.00, green: 0.95, blue: 0.96))
+                    )
+                    .overlay(
+                        Capsule()
+                            .stroke(Color(red: 0.96, green: 0.28, blue: 0.34).opacity(0.28), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(isOpening || isDeleting)
             }
         }
         .padding(18)

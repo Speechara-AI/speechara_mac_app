@@ -1,10 +1,17 @@
 import AppKit
 import SwiftUI
 
+private enum SpeecharaWorkspaceLayout: String {
+    case columns
+    case rows
+}
+
 struct ContentView: View {
     @EnvironmentObject private var authStore: AuthSessionStore
     @EnvironmentObject private var viewModel: SubtitleViewModel
     @AppStorage("speechara.focusModeEnabled") private var isFocusModeEnabled = false
+    @AppStorage("speechara.workspaceLayout") private var workspaceLayoutRawValue = SpeecharaWorkspaceLayout.columns.rawValue
+    @AppStorage("speechara.workspaceSplit") private var workspaceSplitFraction = 0.5
     @State private var isListeningSetupPresented = false
     @State private var shouldStartListeningAfterSetup = false
     @State private var isMicrophoneOffWarningDismissed = false
@@ -28,13 +35,7 @@ struct ContentView: View {
                     }
                 }
 
-                HStack(alignment: .top, spacing: 20) {
-                    transcriptColumn
-                        .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-
-                    translationColumn
-                        .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                }
+                resizableWorkspacePanels
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
                 if viewModel.isTranscriptAnswerVisible {
@@ -74,6 +75,81 @@ struct ContentView: View {
         .onChange(of: viewModel.hasActiveSession) { _ in
             isMicrophoneOffWarningDismissed = false
         }
+    }
+
+    private var workspaceLayout: SpeecharaWorkspaceLayout {
+        SpeecharaWorkspaceLayout(rawValue: workspaceLayoutRawValue) ?? .columns
+    }
+
+    private var workspaceLayoutPicker: some View {
+        Picker("Panel layout", selection: $workspaceLayoutRawValue) {
+            Image(systemName: "rectangle.split.2x1")
+                .tag(SpeecharaWorkspaceLayout.columns.rawValue)
+            Image(systemName: "rectangle.split.1x2")
+                .tag(SpeecharaWorkspaceLayout.rows.rawValue)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(width: 68)
+        .help("Switch transcript and translation layout")
+    }
+
+    private var resizableWorkspacePanels: some View {
+        GeometryReader { proxy in
+            let gap: CGFloat = 6
+            let dividerSize: CGFloat = 8
+            let available = workspaceLayout == .columns ? proxy.size.width : proxy.size.height
+            let minimumPanelSize: CGFloat = workspaceLayout == .columns ? 360 : 240
+            let firstSize = max(minimumPanelSize, min(available - dividerSize - minimumPanelSize, available * workspaceSplitFraction))
+            let secondSize = max(minimumPanelSize, available - dividerSize - firstSize)
+
+            Group {
+                if workspaceLayout == .columns {
+                    HStack(alignment: .top, spacing: gap) {
+                        transcriptColumn.frame(width: firstSize)
+                        workspaceDivider(available: proxy.size.width)
+                        translationColumn.frame(width: secondSize)
+                    }
+                } else {
+                    VStack(spacing: gap) {
+                        transcriptColumn.frame(height: firstSize)
+                        workspaceDivider(available: proxy.size.height)
+                        translationColumn.frame(height: secondSize)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .coordinateSpace(name: "speechara-workspace-split")
+        }
+    }
+
+    private func workspaceDivider(available: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 3, style: .continuous)
+            .fill(Color.secondary.opacity(0.22))
+            .frame(
+                width: workspaceLayout == .columns ? 3 : 28,
+                height: workspaceLayout == .columns ? 28 : 3
+            )
+            .frame(
+                width: workspaceLayout == .columns ? 8 : nil,
+                height: workspaceLayout == .columns ? nil : 8
+            )
+            .contentShape(Rectangle())
+            .onHover { isHovering in
+                if isHovering {
+                    (workspaceLayout == .columns ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .gesture(
+                DragGesture(coordinateSpace: .named("speechara-workspace-split"))
+                    .onChanged { value in
+                        let position = workspaceLayout == .columns ? value.location.x : value.location.y
+                        workspaceSplitFraction = max(0.25, min(0.75, position / max(1, available)))
+                    }
+            )
+            .accessibilityLabel("Resize transcript and translation panels")
     }
 
     private var shouldShowMicrophoneOffWarning: Bool {
@@ -383,6 +459,10 @@ struct ContentView: View {
                         onIncrease: viewModel.increaseTranscriptFontSize
                     )
 
+                    Divider().frame(height: 18)
+                    workspaceLayoutPicker
+                    Divider().frame(height: 18)
+
                     SummaryButton(
                         title: viewModel.sourceSummaryButtonTitle,
                         isEnabled: viewModel.canSummarizeSource,
@@ -408,9 +488,11 @@ struct ContentView: View {
                 if viewModel.isTranscriptSummaryVisible {
                     VSplitView {
                         historyPanel(
-                            text: editableTranscriptBinding,
+                            text: viewModel.subtitlesText,
+                            entries: viewModel.transcriptEntries,
                             draftText: viewModel.liveSubtitlePreview,
                             fontSize: viewModel.transcriptFontSize,
+                            isDialogueMode: true,
                             placeholder: viewModel.transcriptPlaceholderText
                         )
                         .frame(minHeight: 180)
@@ -431,9 +513,11 @@ struct ContentView: View {
                 } else if viewModel.isTranscriptProtocolVisible {
                     VSplitView {
                         historyPanel(
-                            text: editableTranscriptBinding,
+                            text: viewModel.subtitlesText,
+                            entries: viewModel.transcriptEntries,
                             draftText: viewModel.liveSubtitlePreview,
                             fontSize: viewModel.transcriptFontSize,
+                            isDialogueMode: true,
                             placeholder: viewModel.transcriptPlaceholderText
                         )
                         .frame(minHeight: 180)
@@ -453,9 +537,11 @@ struct ContentView: View {
                     .frame(maxHeight: .infinity)
                 } else {
                     historyPanel(
-                        text: editableTranscriptBinding,
+                        text: viewModel.subtitlesText,
+                        entries: viewModel.transcriptEntries,
                         draftText: viewModel.liveSubtitlePreview,
                         fontSize: viewModel.transcriptFontSize,
+                        isDialogueMode: true,
                         placeholder: viewModel.transcriptPlaceholderText
                     )
                 }
@@ -520,6 +606,8 @@ struct ContentView: View {
                         onIncrease: viewModel.increaseTranslationFontSize
                     )
 
+                    Divider().frame(height: 18)
+
                     SummaryButton(
                         title: viewModel.translationSummaryButtonTitle,
                         isEnabled: viewModel.canSummarizeTranslation,
@@ -542,7 +630,7 @@ struct ContentView: View {
                             entries: viewModel.translationEntries,
                             draftText: viewModel.liveTranslationPreview,
                             fontSize: viewModel.translationFontSize,
-                            isDialogueMode: viewModel.showsTranslationDialogueMode,
+                            isDialogueMode: true,
                             placeholder: viewModel.translationPlaceholderText
                         )
                         .frame(minHeight: 180)
@@ -567,7 +655,7 @@ struct ContentView: View {
                             entries: viewModel.translationEntries,
                             draftText: viewModel.liveTranslationPreview,
                             fontSize: viewModel.translationFontSize,
-                            isDialogueMode: viewModel.showsTranslationDialogueMode,
+                            isDialogueMode: true,
                             placeholder: viewModel.translationPlaceholderText
                         )
                         .frame(minHeight: 180)
@@ -592,7 +680,7 @@ struct ContentView: View {
                             entries: viewModel.translationEntries,
                             draftText: viewModel.liveTranslationPreview,
                             fontSize: viewModel.translationFontSize,
-                            isDialogueMode: viewModel.showsTranslationDialogueMode,
+                            isDialogueMode: true,
                             placeholder: viewModel.translationPlaceholderText
                         )
                         .frame(minHeight: 180)
@@ -616,7 +704,7 @@ struct ContentView: View {
                         entries: viewModel.translationEntries,
                         draftText: viewModel.liveTranslationPreview,
                         fontSize: viewModel.translationFontSize,
-                        isDialogueMode: viewModel.showsTranslationDialogueMode,
+                        isDialogueMode: true,
                         placeholder: viewModel.translationPlaceholderText
                     )
                 }
@@ -725,13 +813,16 @@ struct ContentView: View {
         placeholder: String
     ) -> some View {
         Group {
-            if entries.isEmpty && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if entries.isEmpty
+                && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 EmptyPanelPlaceholder(text: placeholder)
             } else if isDialogueMode {
                 DialogueHistoryPanel(
                     entries: entries,
                     fontSize: fontSize,
-                    speakerLabel: viewModel.speakerDisplayLabel(for:)
+                    speakerLabel: viewModel.speakerDisplayLabel(for:),
+                    draftText: draftText
                 )
             } else {
                 ReadOnlyTextPanel(text: text, draftText: draftText, fontSize: fontSize)
@@ -756,22 +847,27 @@ private struct EditableTextPanel: View {
     let placeholder: String
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            if text.isEmpty && draftText.isEmpty {
-                Text(placeholder)
-                    .font(.system(size: fontSize, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 14)
-                    .allowsHitTesting(false)
-            }
+        VStack(spacing: 0) {
+            ZStack(alignment: .topLeading) {
+                if text.isEmpty && draftText.isEmpty {
+                    Text(placeholder)
+                        .font(.system(size: fontSize, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 14)
+                        .allowsHitTesting(false)
+                }
 
-            AutoScrollingEditableTextView(
-                text: $text,
-                draftText: draftText,
-                fontSize: fontSize
-            )
-                .padding(8)
+                AutoScrollingEditableTextView(
+                    text: $text,
+                    draftText: "",
+                    fontSize: fontSize
+                )
+                    .padding(8)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            LiveDraftStrip(text: draftText, fontSize: fontSize)
         }
         .background(
             RoundedRectangle(cornerRadius: 14)
@@ -943,52 +1039,44 @@ private struct ReadOnlyTextPanel: View {
     let text: String
     let draftText: String
     let fontSize: CGFloat
+    @State private var scrollWorkItem: DispatchWorkItem?
     private let bottomAnchor = "read-only-bottom-anchor"
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                styledText
-                    .font(.system(size: fontSize, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-                    .padding(12)
+        VStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(text.isEmpty ? " " : text)
+                        .foregroundColor(.primary)
+                        .font(.system(size: fontSize, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .padding(12)
 
-                Color.clear
-                    .frame(height: 1)
-                    .id(bottomAnchor)
+                    Color.clear
+                        .frame(height: 1)
+                        .id(bottomAnchor)
+                }
+                .onAppear {
+                    scrollToBottom(using: proxy)
+                }
+                .onChange(of: text) { _ in
+                    scrollToBottom(using: proxy)
+                }
             }
-            .onAppear {
-                scrollToBottom(using: proxy)
-            }
-            .onChange(of: text) { _ in
-                scrollToBottom(using: proxy)
-            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            LiveDraftStrip(text: draftText, fontSize: fontSize)
         }
-    }
-
-    private var styledText: Text {
-        let displayText = text.isEmpty ? " " : text
-        let cleanDraft = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanDraft.isEmpty,
-              let draftRange = displayText.range(of: cleanDraft, options: .backwards) else {
-            return Text(displayText)
-                .foregroundColor(.primary)
-        }
-
-        let lineStart = displayText[..<draftRange.lowerBound].lastIndex(of: "\n")
-            .map { displayText.index(after: $0) }
-            ?? displayText.startIndex
-        let stableText = String(displayText[..<lineStart])
-        let workingText = String(displayText[lineStart...])
-        return Text(stableText).foregroundColor(.primary)
-            + Text(workingText).foregroundColor(.secondary)
     }
 
     private func scrollToBottom(using proxy: ScrollViewProxy) {
-        DispatchQueue.main.async {
+        scrollWorkItem?.cancel()
+        let workItem = DispatchWorkItem {
             proxy.scrollTo(bottomAnchor, anchor: .bottom)
         }
+        scrollWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: workItem)
     }
 }
 
@@ -1009,10 +1097,44 @@ private struct EmptyPanelPlaceholder: View {
     }
 }
 
+private struct LiveDraftStrip: View {
+    let text: String
+    let fontSize: CGFloat
+
+    private var cleanText: String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        if !cleanText.isEmpty {
+            ZStack(alignment: .leading) {
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+
+                Text(cleanText)
+                    .font(.system(size: fontSize, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.head)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+            }
+            .frame(height: max(42, fontSize * 2.55))
+            .overlay(alignment: .top) {
+                Divider().opacity(0.55)
+            }
+            .accessibilityLabel(SL("Live draft"))
+            .accessibilityValue(cleanText)
+        }
+    }
+}
+
 private struct DialogueHistoryPanel: View {
     let entries: [DialogueEntry]
     let fontSize: CGFloat
     let speakerLabel: (Int) -> String
+    let draftText: String
+    @State private var scrollWorkItem: DispatchWorkItem?
     private let bottomAnchor = "dialogue-bottom-anchor"
     private static let timestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -1022,30 +1144,18 @@ private struct DialogueHistoryPanel: View {
     }()
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(entries) { entry in
-                        if let speakerNumber = entry.speakerNumber {
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack(spacing: 8) {
-                                    TimestampBadge(label: Self.timestampFormatter.string(from: entry.timestamp))
+        VStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 5) {
+                        ForEach(entries) { entry in
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                TimestampBadge(label: Self.timestampFormatter.string(from: entry.timestamp))
+
+                                if let speakerNumber = entry.speakerNumber {
                                     SpeakerBadge(label: speakerLabel(speakerNumber))
                                 }
-                                Text(entry.text)
-                                    .font(.system(size: fontSize, design: .monospaced))
-                                    .foregroundStyle(entry.isDraft ? Color.secondary : Color.primary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .textSelection(.enabled)
-                            }
-                            .padding(12)
-                            .background(
-                                RoundedRectangle(cornerRadius: 16)
-                                    .fill(Self.bubbleColor(for: speakerNumber))
-                            )
-                        } else {
-                            VStack(alignment: .leading, spacing: 6) {
-                                TimestampBadge(label: Self.timestampFormatter.string(from: entry.timestamp))
+
                                 Text(entry.text)
                                     .font(.system(size: fontSize, design: .monospaced))
                                     .foregroundStyle(entry.isDraft ? Color.secondary : Color.primary)
@@ -1053,21 +1163,25 @@ private struct DialogueHistoryPanel: View {
                                     .textSelection(.enabled)
                             }
                             .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
                         }
-                    }
 
-                    Color.clear
-                        .frame(height: 1)
-                        .id(bottomAnchor)
+                        Color.clear
+                            .frame(height: 1)
+                            .id(bottomAnchor)
+                    }
+                    .padding(12)
                 }
-                .padding(12)
+                .onAppear {
+                    scrollToBottom(using: proxy)
+                }
+                .onChange(of: scrollSignature) { _ in
+                    scrollToBottom(using: proxy)
+                }
             }
-            .onAppear {
-                scrollToBottom(using: proxy)
-            }
-            .onChange(of: scrollSignature) { _ in
-                scrollToBottom(using: proxy)
-            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            LiveDraftStrip(text: draftText, fontSize: fontSize)
         }
     }
 
@@ -1076,27 +1190,18 @@ private struct DialogueHistoryPanel: View {
             return "empty"
         }
 
-        return "\(entries.count)-\(lastEntry.id.uuidString)-\(lastEntry.text.hashValue)-\(lastEntry.isDraft)"
+        return "\(entries.count)-\(lastEntry.id.uuidString)-\(lastEntry.text.count)-\(lastEntry.isDraft)"
     }
 
     private func scrollToBottom(using proxy: ScrollViewProxy) {
-        DispatchQueue.main.async {
+        scrollWorkItem?.cancel()
+        let workItem = DispatchWorkItem {
             proxy.scrollTo(bottomAnchor, anchor: .bottom)
         }
+        scrollWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: workItem)
     }
 
-    private static func bubbleColor(for speakerNumber: Int) -> Color {
-        let colors: [Color] = [
-            Color.blue.opacity(0.10),
-            Color.green.opacity(0.10),
-            Color.orange.opacity(0.12),
-            Color.pink.opacity(0.10),
-            Color.teal.opacity(0.10),
-            Color.indigo.opacity(0.10),
-        ]
-
-        return colors[(max(1, speakerNumber) - 1) % colors.count]
-    }
 }
 
 private struct SpeakerBadge: View {
@@ -1104,10 +1209,10 @@ private struct SpeakerBadge: View {
 
     var body: some View {
         Text(label)
-            .font(.system(.caption, design: .rounded))
+            .font(.system(size: 10, weight: .semibold, design: .rounded))
             .fontWeight(.semibold)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
             .background(
                 Capsule()
                     .fill(Color.primary.opacity(0.08))
@@ -1121,9 +1226,9 @@ private struct TimestampBadge: View {
 
     var body: some View {
         Text(label)
-            .font(.system(size: 11, weight: .medium, design: .monospaced))
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
+            .font(.system(size: 10, weight: .medium, design: .monospaced))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
             .background(
                 Capsule()
                     .fill(Color.secondary.opacity(0.10))

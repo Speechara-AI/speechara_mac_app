@@ -376,8 +376,8 @@ final class SubtitleViewModel: ObservableObject {
     private let localAudioRecordingService = LocalAudioRecordingService()
     private let mixedAudioStreamMixer = MixedAudioStreamMixer()
     private let liveDeepgramService = DeepgramLiveTranscriptionService()
-    private let liveTranslationService = DeepSeekTranslationService()
-    private let finalTranslationService = DeepSeekTranslationService()
+    private let liveTranslationService = SpeecharaLiveTranslationV2Service()
+    private var finalTranslationService: SpeecharaLiveTranslationV2Service { liveTranslationService }
     private let deepSeekSummaryService = DeepSeekSummaryService()
     private let deepSeekMeetingProtocolService = DeepSeekMeetingProtocolService()
     private let deepSeekAnswerAssistService = DeepSeekAnswerAssistService()
@@ -395,6 +395,8 @@ final class SubtitleViewModel: ObservableObject {
     private var lastDeepgramFinalTranscript = ""
     private var nextStableTurnIndex = 0
     private var stableReconstructionTask: Task<Void, Never>?
+    private var translationPreparationTask: Task<Void, Never>?
+    private var streamingSessionGeneration = UUID()
     private var draftAutosaveTask: Task<Void, Never>?
     private var pendingTranslationDrafts = [UUID: String]()
     private var translationPreviewTurnID: UUID?
@@ -728,7 +730,9 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     func startListening(mode: ListeningSessionStartMode, includeMicrophone: Bool = false) {
+        SpeecharaDiagnostics.session.notice("startListening requested mode=\(String(describing: mode)) includeMicrophone=\(includeMicrophone) isSystemListening=\(self.isSystemAudioListening) isBusy=\(self.isBusy)")
         guard !isSystemAudioListening, !isBusy else {
+            SpeecharaDiagnostics.session.warning("startListening ignored because session is already active or busy")
             return
         }
 
@@ -748,6 +752,7 @@ final class SubtitleViewModel: ObservableObject {
 
                 try await startSystemAudioListening(includeMicrophone: includeMicrophone)
             } catch {
+                SpeecharaDiagnostics.session.error("startListening failed error=\(error.localizedDescription)")
                 errorMessage = error.localizedDescription
 
                 if !hasActiveAudioSource {
@@ -793,6 +798,7 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     func startNewSession() {
+        SpeecharaDiagnostics.session.notice("startNewSession requested active=\(self.hasActiveSession) busy=\(self.isBusy)")
         guard !isBusy, !isMicrophoneBusy else {
             return
         }
@@ -817,6 +823,7 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     func stopListening() {
+        SpeecharaDiagnostics.session.notice("stopListening requested systemListening=\(self.isSystemAudioListening) busy=\(self.isBusy)")
         guard isSystemAudioListening, !isBusy else {
             return
         }
@@ -874,6 +881,7 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     func stopActiveSession() {
+        SpeecharaDiagnostics.session.notice("stopActiveSession requested active=\(self.hasActiveSession) busy=\(self.isBusy) microphoneBusy=\(self.isMicrophoneBusy)")
         guard hasActiveSession, !isBusy, !isMicrophoneBusy else {
             return
         }
@@ -1253,7 +1261,7 @@ final class SubtitleViewModel: ObservableObject {
         let transcriptBlocksByID = Dictionary(uniqueKeysWithValues: transcriptBlocks.map { ($0.id, $0) })
 
         return sessionTurns.compactMap { turn in
-            let text = visibleTranslationText(for: turn).trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = turn.translationText.trimmingCharacters(in: .whitespacesAndNewlines)
             let transcriptBlockID = "turn-\(turn.id.uuidString.lowercased())"
             guard let transcriptBlock = transcriptBlocksByID[transcriptBlockID] else {
                 return nil
@@ -1575,20 +1583,8 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     private func configureMixedAudioOutput() async {
-        await mixedAudioStreamMixer.setOutputHandler { [weak self, localAudioRecordingService, liveDeepgramService] audioData in
+        await mixedAudioStreamMixer.setOutputHandler { [localAudioRecordingService, liveDeepgramService] audioData in
             await localAudioRecordingService.appendMixedAudio(audioData)
-
-            guard let self else {
-                return
-            }
-
-            let shouldSend = await MainActor.run {
-                self.isStreamingSessionPrepared && self.hasActiveAudioSource
-            }
-            guard shouldSend else {
-                return
-            }
-
             await liveDeepgramService.sendAudio(audioData)
         }
     }
@@ -1784,7 +1780,13 @@ final class SubtitleViewModel: ObservableObject {
         // Keep the latest draft visible until the final translation replaces it.
     }
 
-    private func prepareTranslationIfPossible() async {
+    private func prepareTranslationIfPossible(for generation: UUID) async {
+        guard generation == streamingSessionGeneration,
+              isStreamingSessionPrepared,
+              !Task.isCancelled else {
+            return
+        }
+
         guard isTranslationEnabled else {
             isTranslationAvailable = false
             translationMessage = nil
@@ -1792,6 +1794,11 @@ final class SubtitleViewModel: ObservableObject {
             await finalTranslationService.resetSession()
             return
         }
+
+        let startedAt = Date()
+        SpeecharaDiagnostics.translation.notice(
+            "background translation preparation started generation=\(generation.uuidString)"
+        )
 
         let eventHandler: @Sendable (DeepSeekTranslationEvent) -> Void = { [weak self] event in
             Task { @MainActor in
@@ -1807,6 +1814,11 @@ final class SubtitleViewModel: ObservableObject {
                 targetLanguageName: selectedTranslationLanguage.deepSeekTargetLanguageName,
                 eventHandler: eventHandler
             )
+            guard generation == streamingSessionGeneration,
+                  isStreamingSessionPrepared,
+                  !Task.isCancelled else {
+                return
+            }
             try await finalTranslationService.startSession(
                 sourceLanguageCode: selectedSourceLanguage.deepgramLanguageCode,
                 sourceLanguageName: selectedSourceLanguage.deepSeekLanguageName,
@@ -1814,18 +1826,63 @@ final class SubtitleViewModel: ObservableObject {
                 targetLanguageName: selectedTranslationLanguage.deepSeekTargetLanguageName,
                 eventHandler: eventHandler
             )
+            guard generation == streamingSessionGeneration,
+                  isStreamingSessionPrepared,
+                  !Task.isCancelled else {
+                return
+            }
             isTranslationAvailable = true
             translationMessage = nil
             liveTranslationPreview = ""
             let history = translationHistoryTurns()
             await liveTranslationService.replaceHistory(with: history)
             await finalTranslationService.replaceHistory(with: history)
+            await enqueueUntranslatedTurnsForTranslation(generation: generation)
+            SpeecharaDiagnostics.translation.notice(
+                "background translation preparation completed durationMs=\(Int(Date().timeIntervalSince(startedAt) * 1_000))"
+            )
         } catch {
+            guard generation == streamingSessionGeneration,
+                  isStreamingSessionPrepared,
+                  !Task.isCancelled else {
+                return
+            }
             await liveTranslationService.resetSession()
             await finalTranslationService.resetSession()
             isTranslationAvailable = false
             translationMessage = SLF("%@ translation is unavailable: %@", selectedTranslationLanguage.displayName, error.localizedDescription)
             liveTranslationPreview = ""
+            SpeecharaDiagnostics.translation.error(
+                "background translation preparation failed durationMs=\(Int(Date().timeIntervalSince(startedAt) * 1_000)) error=\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func enqueueUntranslatedTurnsForTranslation(generation: UUID) async {
+        let untranslatedTurns = sessionTurns.filter {
+            !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && $0.translationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+
+        guard !untranslatedTurns.isEmpty else {
+            return
+        }
+
+        SpeecharaDiagnostics.translation.notice(
+            "backfilling untranslated turns count=\(untranslatedTurns.count)"
+        )
+        for turn in untranslatedTurns {
+            guard generation == streamingSessionGeneration,
+                  isStreamingSessionPrepared,
+                  isTranslationAvailable,
+                  !Task.isCancelled else {
+                return
+            }
+            if turn.isClosed {
+                await finalTranslationService.enqueueFinalChunk(turn.text, turnID: turn.id)
+            } else {
+                await liveTranslationService.enqueueInterimChunk(turn.text, turnID: turn.id)
+            }
         }
     }
 
@@ -1889,6 +1946,9 @@ final class SubtitleViewModel: ObservableObject {
             return
         }
 
+        let startupStartedAt = Date()
+        streamingSessionGeneration = UUID()
+        let generation = streamingSessionGeneration
         refreshAvailableMicrophones()
 
         do {
@@ -1915,10 +1975,16 @@ final class SubtitleViewModel: ObservableObject {
             updateMicrophoneLiveHandler()
             await mixedAudioStreamMixer.setMicrophoneEnabled(false)
             isTranslationAvailable = false
-            await prepareTranslationIfPossible()
             liveSubtitlePreview = ""
             liveTranslationPreview = ""
             isStreamingSessionPrepared = true
+            translationPreparationTask?.cancel()
+            translationPreparationTask = Task { @MainActor [weak self] in
+                await self?.prepareTranslationIfPossible(for: generation)
+            }
+            SpeecharaDiagnostics.session.notice(
+                "streaming session ready for audio durationMs=\(Int(Date().timeIntervalSince(startupStartedAt) * 1_000)); translation continues in background"
+            )
         } catch {
             await cleanupFailedStreamingStartup()
             throw error
@@ -1955,6 +2021,7 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     private func handleLiveTranscriptionRuntimeError(_ message: String) {
+        SpeecharaDiagnostics.transcription.error("runtime error message=\(message) prepared=\(self.isStreamingSessionPrepared)")
         let interruptionMessage = "Live transcription was interrupted: \(message)"
         errorMessage = interruptionMessage
 
@@ -1997,8 +2064,12 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     private func stopStreamingSession(markStopped: Bool, persistHistoryAsActive: Bool = true) async {
+        SpeecharaDiagnostics.session.notice("stopStreamingSession begin markStopped=\(markStopped) persistHistoryAsActive=\(persistHistoryAsActive) prepared=\(self.isStreamingSessionPrepared) system=\(self.isSystemAudioListening) mic=\(self.isMicrophoneListening)")
         var stopError: Error?
 
+        translationPreparationTask?.cancel()
+        translationPreparationTask = nil
+        streamingSessionGeneration = UUID()
         resetMicrophoneService()
         isMicrophoneCaptureActive = false
         isMicrophoneListening = false
@@ -2065,6 +2136,9 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     private func cleanupFailedStreamingStartup() async {
+        translationPreparationTask?.cancel()
+        translationPreparationTask = nil
+        streamingSessionGeneration = UUID()
         systemAudioCaptureService.setLiveAudioDataHandler(nil)
         resetMicrophoneService()
         await liveDeepgramService.stop()
@@ -2106,8 +2180,7 @@ final class SubtitleViewModel: ObservableObject {
             }
             pendingTranslationDrafts[turnID] = translation
             translationPreviewTurnID = turnID
-            liveTranslationPreview = translation
-            rebuildPublishedState()
+            liveTranslationPreview = timestampedTranslationPreview(translation, turnID: turnID)
         case .completed(let turnID, let translation):
             pendingTranslationDrafts.removeValue(forKey: turnID)
             if translationPreviewTurnID == turnID {
@@ -2222,6 +2295,10 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     private func rebuildPublishedState() {
+        normalizeAccidentalTranslationSpeakerLabels()
+        removeUnsupportedSpeakerLabels()
+        resetSpeakerNumbering()
+
         transcriptEntries = sessionTurns.compactMap { turn in
             let text = turn.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else {
@@ -2237,17 +2314,16 @@ final class SubtitleViewModel: ObservableObject {
         }
 
         translationEntries = sessionTurns.compactMap { turn in
-            let visibleTranslation = visibleTranslationText(for: turn).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !visibleTranslation.isEmpty else {
+            let committedTranslation = restoredPlainTranslationText(for: turn)
+            guard !committedTranslation.isEmpty else {
                 return nil
             }
 
             return DialogueEntry(
                 id: turn.id,
-                speakerNumber: speakerNumber(for: turn.translationSpeakerLabel ?? turn.speakerLabel),
-                text: visibleTranslation,
-                timestamp: turn.timestamp,
-                isDraft: pendingTranslationDrafts[turn.id] != nil
+                speakerNumber: speakerNumber(for: turn.speakerLabel),
+                text: committedTranslation,
+                timestamp: turn.timestamp
             )
         }
 
@@ -2263,18 +2339,59 @@ final class SubtitleViewModel: ObservableObject {
         )
     }
 
-    private func visibleTranslationText(for turn: SessionTurn) -> String {
-        let committed = turn.translationText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let preview = pendingTranslationDrafts[turn.id]?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !preview.isEmpty else {
-            return committed
+    private func timestampedTranslationPreview(_ translation: String, turnID: UUID) -> String {
+        let text = translation.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            return ""
+        }
+        guard let turn = sessionTurns.first(where: { $0.id == turnID }) else {
+            return text
+        }
+        return "[\(Self.transcriptTimestampFormatter.string(from: turn.timestamp))] \(text)"
+    }
+
+    private func restoredPlainTranslationText(for turn: SessionTurn) -> String {
+        let text = turn.translationText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard turn.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty == nil,
+              let accidentalLabel = turn.translationSpeakerLabel?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty else {
+            return text
         }
 
-        guard !committed.isEmpty else {
-            return preview
+        guard !text.isEmpty else {
+            return accidentalLabel
         }
+        return "\(accidentalLabel): \(text)"
+    }
 
-        return mergedText(existing: committed, addition: preview)
+    private func normalizeAccidentalTranslationSpeakerLabels() {
+        for index in sessionTurns.indices {
+            guard sessionTurns[index].speakerLabel?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty == nil,
+                let accidentalLabel = sessionTurns[index].translationSpeakerLabel?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .nilIfEmpty else {
+                continue
+            }
+
+            let text = sessionTurns[index].translationText.trimmingCharacters(in: .whitespacesAndNewlines)
+            sessionTurns[index].translationText = text.isEmpty
+                ? accidentalLabel
+                : "\(accidentalLabel): \(text)"
+            sessionTurns[index].translationSpeakerLabel = nil
+        }
+    }
+
+    private func removeUnsupportedSpeakerLabels() {
+        // Deepgram diarization is intentionally disabled for this client. Until the
+        // app has a real speaker-identification source, labels inferred by an AI
+        // cleanup pass are misleading and must never reach the UI or saved history.
+        for index in sessionTurns.indices {
+            sessionTurns[index].speakerLabel = nil
+            sessionTurns[index].translationSpeakerLabel = nil
+        }
     }
 
     private func parseTranscriptEditorTurns(from text: String) -> [SessionTurn] {
@@ -2491,10 +2608,11 @@ final class SubtitleViewModel: ObservableObject {
                         role: "system",
                         content: """
                         Reconstruct clean readable dialogue from raw live STT.
-                        Fix only obvious transcription mistakes, restore phrase boundaries, and split speakers when there is high confidence.
-                        Preserve chronology and preserve timestamps from the input lines.
+                        Fix only obvious transcription mistakes and punctuation.
+                        Preserve chronology, timestamps, and exactly one output item per input line.
+                        Never infer, identify, split, merge, or add speakers. Do not add speaker labels.
                         Return ONLY valid JSON in this exact shape:
-                        [{"timestamp":"HH:mm:ss","speaker":"optional label or empty string","text":"clean text"}]
+                        [{"timestamp":"HH:mm:ss","text":"clean text"}]
                         No markdown, no explanations, no code fences.
                         """
                     ),
@@ -2521,22 +2639,18 @@ final class SubtitleViewModel: ObservableObject {
         let cleanedPayload = stripMarkdownCodeFence(from: content)
         guard let payloadData = cleanedPayload.data(using: .utf8),
               let reconstructedLines = try? JSONDecoder().decode([StructuredDialogueLine].self, from: payloadData),
-              !reconstructedLines.isEmpty else {
+              reconstructedLines.count == turns.count else {
             return turns
         }
 
-        return reconstructedLines.compactMap { line in
+        return turns.enumerated().map { offset, originalTurn in
+            let line = reconstructedLines[offset]
             let text = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else {
-                return nil
-            }
-
-            return SessionTurn(
-                speakerLabel: line.speaker?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-                text: text,
-                timestamp: parsedTimestampString(line.timestamp) ?? Date(),
-                isClosed: true
-            )
+            var updatedTurn = originalTurn
+            updatedTurn.speakerLabel = nil
+            updatedTurn.translationSpeakerLabel = nil
+            updatedTurn.text = text.isEmpty ? originalTurn.text : text
+            return updatedTurn
         }
     }
 
@@ -2562,8 +2676,18 @@ final class SubtitleViewModel: ObservableObject {
 
         return turns.enumerated().map { offset, turn in
             var updatedTurn = turn
-            updatedTurn.translationSpeakerLabel = translatedLines[offset].speakerLabel
-            updatedTurn.translationText = translatedLines[offset].text
+            let translatedLine = translatedLines[offset]
+            if turn.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty != nil {
+                updatedTurn.translationSpeakerLabel = translatedLine.speakerLabel
+                updatedTurn.translationText = translatedLine.text
+            } else {
+                updatedTurn.translationSpeakerLabel = nil
+                if let accidentalLabel = translatedLine.speakerLabel {
+                    updatedTurn.translationText = "\(accidentalLabel): \(translatedLine.text)"
+                } else {
+                    updatedTurn.translationText = translatedLine.text
+                }
+            }
             return updatedTurn
         }
     }

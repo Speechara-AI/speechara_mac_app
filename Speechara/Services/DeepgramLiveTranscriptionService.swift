@@ -156,6 +156,15 @@ struct DeepgramTranscriptResult: Sendable {
 
 actor DeepgramLiveTranscriptionService {
     private static let diagnosticsInterval: TimeInterval = 5
+    // Never replay old meeting audio after a temporary network stall. Eight 64 ms
+    // chunks keep less than 0.6 s of audio waiting on the client.
+    private static let maximumPendingAudioChunks = 8
+    private static let reconnectDelayNanoseconds: [UInt64] = [
+        250_000_000,
+        750_000_000,
+        2_000_000_000,
+        4_000_000_000,
+    ]
     private static let logger = Logger(subsystem: "ai.speechara.mac", category: "DeepgramLiveTranscription")
 
     private let session: URLSession
@@ -168,18 +177,25 @@ actor DeepgramLiveTranscriptionService {
     private var webSocketTask: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
     private var keepAliveTask: Task<Void, Never>?
+    private var audioSendLoopTask: Task<Void, Never>?
+    private var pendingAudioChunks = [Data]()
     private var eventHandler: (@Sendable (DeepgramTranscriptEvent) -> Void)?
     private var errorHandler: (@Sendable (String) -> Void)?
     private var isStopping = false
     private var didReportStreamingError = false
     private var connectionGeneration = UUID()
     private var lastDiagnosticsLogDate = Date()
+    private var lastResultDiagnosticsLogDate = Date()
+    private var firstAudioSentAtUptimeNanoseconds: UInt64?
+    private var sentAudioSampleCount: Int64 = 0
     private var enqueuedChunkCount = 0
     private var sentChunkCount = 0
     private var sendDurationTotalMilliseconds = 0.0
     private var sendDurationSampleCount = 0
     private var reconnectAttemptCount = 0
     private var inFlightAudioSendCount = 0
+    private var droppedAudioChunkCount = 0
+    private var maximumObservedPendingAudioChunks = 0
     private var audioSendsDrainedContinuation: CheckedContinuation<Void, Never>?
 
     init(
@@ -209,7 +225,9 @@ actor DeepgramLiveTranscriptionService {
         eventHandler: @escaping @Sendable (DeepgramTranscriptEvent) -> Void,
         errorHandler: @escaping @Sendable (String) -> Void
     ) async throws {
+        SpeecharaDiagnostics.transcription.notice("connect requested language=\(sourceLanguageCode) diarize=\(diarize) utterances=\(utterances)")
         guard webSocketTask == nil else {
+            SpeecharaDiagnostics.transcription.error("connect rejected: websocket already exists")
             throw DeepgramLiveTranscriptionError.alreadyConnected
         }
 
@@ -234,23 +252,39 @@ actor DeepgramLiveTranscriptionService {
 
     func sendAudio(_ audioData: Data) {
         guard !audioData.isEmpty, !isStopping, !didReportStreamingError, let webSocketTask else {
+            SpeecharaDiagnostics.audio.debug("audio chunk dropped bytes=\(audioData.count) stopping=\(self.isStopping) hasSocket=\(self.webSocketTask != nil) reportedError=\(self.didReportStreamingError)")
             return
         }
 
         enqueuedChunkCount += 1
-        inFlightAudioSendCount += 1
+        if pendingAudioChunks.count >= Self.maximumPendingAudioChunks {
+            let numberToDrop = pendingAudioChunks.count - Self.maximumPendingAudioChunks + 1
+            pendingAudioChunks.removeFirst(numberToDrop)
+            droppedAudioChunkCount += numberToDrop
+            Self.logger.warning(
+                "dropped stale audio chunks count=\(numberToDrop, privacy: .public) totalDropped=\(self.droppedAudioChunkCount, privacy: .public)"
+            )
+        }
+        pendingAudioChunks.append(audioData)
+        maximumObservedPendingAudioChunks = max(maximumObservedPendingAudioChunks, pendingAudioChunks.count)
         logDiagnosticsIfNeeded(reason: "enqueue")
         let generation = connectionGeneration
 
-        // This intentionally mirrors the web client: hand every 256 ms block to
-        // the WebSocket immediately. There is no app-level audio backlog to drain.
-        Task { [weak self] in
-            await self?.sendAudioImmediately(audioData, on: webSocketTask, generation: generation)
+        guard audioSendLoopTask == nil else {
+            return
+        }
+        audioSendLoopTask = Task { [weak self] in
+            await self?.runAudioSendLoop(on: webSocketTask, generation: generation)
         }
     }
 
     func stop() async {
+        SpeecharaDiagnostics.transcription.notice(
+            "stop requested pendingAudio=\(self.pendingAudioChunks.count) inFlight=\(self.inFlightAudioSendCount) dropped=\(self.droppedAudioChunkCount)"
+        )
         isStopping = true
+        pendingAudioChunks.removeAll()
+        audioSendLoopTask?.cancel()
         await waitForOutstandingAudioSends()
 
         if let webSocketTask {
@@ -316,38 +350,63 @@ actor DeepgramLiveTranscriptionService {
         }
     }
 
-    private func sendAudioImmediately(
-        _ audioData: Data,
+    private func runAudioSendLoop(
         on webSocketTask: URLSessionWebSocketTask,
         generation: UUID
     ) async {
         defer {
-            audioSendDidFinish()
+            audioSendLoopDidFinish(generation: generation, webSocketTask: webSocketTask)
         }
 
-        guard generation == connectionGeneration,
-              self.webSocketTask === webSocketTask,
-              !isStopping,
-              !didReportStreamingError else {
-            return
-        }
-
-        do {
-            let startedAt = Date()
-            try await webSocketTask.send(.data(audioData))
-            let elapsedMilliseconds = Date().timeIntervalSince(startedAt) * 1_000
-            sentChunkCount += 1
-            sendDurationTotalMilliseconds += elapsedMilliseconds
-            sendDurationSampleCount += 1
-            logDiagnosticsIfNeeded(reason: "send")
-        } catch is CancellationError {
-            return
-        } catch {
-            guard generation == connectionGeneration, !isStopping else {
+        while !Task.isCancelled {
+            guard generation == connectionGeneration,
+                  self.webSocketTask === webSocketTask,
+                  !isStopping,
+                  !didReportStreamingError,
+                  !pendingAudioChunks.isEmpty else {
                 return
             }
 
-            handleStreamingError(DeepgramLiveTranscriptionError.sendFailed(error))
+            let audioData = pendingAudioChunks.removeFirst()
+            inFlightAudioSendCount = 1
+            do {
+                let startedAt = Date()
+                try await webSocketTask.send(.data(audioData))
+                let elapsedMilliseconds = Date().timeIntervalSince(startedAt) * 1_000
+                if firstAudioSentAtUptimeNanoseconds == nil {
+                    firstAudioSentAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+                }
+                sentAudioSampleCount += Int64(audioData.count / MemoryLayout<Int16>.size)
+                sentChunkCount += 1
+                reconnectAttemptCount = 0
+                sendDurationTotalMilliseconds += elapsedMilliseconds
+                sendDurationSampleCount += 1
+                inFlightAudioSendCount = 0
+                audioSendDidFinish()
+                logDiagnosticsIfNeeded(reason: "send")
+            } catch is CancellationError {
+                inFlightAudioSendCount = 0
+                audioSendDidFinish()
+                return
+            } catch {
+                inFlightAudioSendCount = 0
+                audioSendDidFinish()
+                guard generation == connectionGeneration,
+                      self.webSocketTask === webSocketTask,
+                      !isStopping else {
+                    return
+                }
+                if await reconnectAfterTransientSocketFailure(
+                    error,
+                    generation: generation,
+                    failedTask: webSocketTask,
+                    cancelAudioSendLoop: false
+                ) {
+                    return
+                }
+                handleStreamingError(DeepgramLiveTranscriptionError.sendFailed(error))
+                return
+            }
         }
     }
 
@@ -385,7 +444,12 @@ actor DeepgramLiveTranscriptionService {
                     break
                 }
 
-                if await reconnectAfterTransientSocketFailure(error, generation: generation, failedTask: webSocketTask) {
+                if await reconnectAfterTransientSocketFailure(
+                    error,
+                    generation: generation,
+                    failedTask: webSocketTask,
+                    cancelAudioSendLoop: true
+                ) {
                     break
                 }
 
@@ -417,9 +481,10 @@ actor DeepgramLiveTranscriptionService {
     private func reconnectAfterTransientSocketFailure(
         _ error: Error,
         generation: UUID,
-        failedTask: URLSessionWebSocketTask
+        failedTask: URLSessionWebSocketTask,
+        cancelAudioSendLoop: Bool
     ) async -> Bool {
-        guard reconnectAttemptCount < 2,
+        guard reconnectAttemptCount < Self.reconnectDelayNanoseconds.count,
               generation == connectionGeneration,
               self.webSocketTask === failedTask,
               !isStopping,
@@ -427,29 +492,48 @@ actor DeepgramLiveTranscriptionService {
             return false
         }
 
-        reconnectAttemptCount += 1
         keepAliveTask?.cancel()
         keepAliveTask = nil
+        if cancelAudioSendLoop {
+            audioSendLoopTask?.cancel()
+        }
+        audioSendLoopTask = nil
+        pendingAudioChunks.removeAll()
         failedTask.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
 
-        Self.logger.warning(
-            "Deepgram socket receive failed; reconnecting attempt=\(self.reconnectAttemptCount, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
-        )
+        while reconnectAttemptCount < Self.reconnectDelayNanoseconds.count {
+            let delay = Self.reconnectDelayNanoseconds[reconnectAttemptCount]
+            reconnectAttemptCount += 1
+            Self.logger.warning(
+                "Deepgram socket failed; reconnecting attempt=\(self.reconnectAttemptCount, privacy: .public) source=\(cancelAudioSendLoop ? "receive" : "send", privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+            )
 
-        do {
-            try await Task.sleep(nanoseconds: 250_000_000)
+            do {
+                try await Task.sleep(nanoseconds: delay)
+            } catch {
+                return true
+            }
             guard generation == connectionGeneration,
                   !isStopping,
                   !didReportStreamingError else {
                 return true
             }
 
-            try await openWebSocket()
-            return true
-        } catch {
-            return false
+            webSocketTask = nil
+            do {
+                try await openWebSocket()
+                Self.logger.notice(
+                    "Deepgram websocket reconnected attempt=\(self.reconnectAttemptCount, privacy: .public)"
+                )
+                return true
+            } catch {
+                Self.logger.warning(
+                    "Deepgram reconnect attempt failed attempt=\(self.reconnectAttemptCount, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
+        return false
     }
 
     private func handleIncomingTextMessage(_ text: String) async throws {
@@ -462,6 +546,8 @@ actor DeepgramLiveTranscriptionService {
         switch envelope.type {
         case "Results":
             let results = try JSONDecoder().decode(DeepgramResultsMessage.self, from: data)
+            reconnectAttemptCount = 0
+            logResultLatencyIfNeeded(results)
             let transcript = Self.transcript(from: results)
             guard !transcript.isEmpty else {
                 return
@@ -491,9 +577,11 @@ actor DeepgramLiveTranscriptionService {
 
     private func handleStreamingError(_ error: Error) {
         guard !isStopping, !didReportStreamingError else {
+            SpeecharaDiagnostics.transcription.debug("streaming error suppressed stopping=\(self.isStopping) alreadyReported=\(self.didReportStreamingError)")
             return
         }
 
+        SpeecharaDiagnostics.transcription.error("streaming error error=\(error.localizedDescription) queued=\(self.enqueuedChunkCount) sent=\(self.sentChunkCount)")
         didReportStreamingError = true
         let errorMessage = error.localizedDescription
         let errorHandler = errorHandler
@@ -505,11 +593,14 @@ actor DeepgramLiveTranscriptionService {
         connectionGeneration = UUID()
         receiveTask?.cancel()
         keepAliveTask?.cancel()
+        audioSendLoopTask?.cancel()
         if cancelWebSocket {
             webSocketTask?.cancel(with: .goingAway, reason: nil)
         }
         receiveTask = nil
         keepAliveTask = nil
+        audioSendLoopTask = nil
+        pendingAudioChunks.removeAll()
         webSocketTask = nil
         eventHandler = nil
         errorHandler = nil
@@ -518,10 +609,15 @@ actor DeepgramLiveTranscriptionService {
 
     private func resetDiagnostics() {
         lastDiagnosticsLogDate = Date()
+        lastResultDiagnosticsLogDate = Date()
+        firstAudioSentAtUptimeNanoseconds = nil
+        sentAudioSampleCount = 0
         enqueuedChunkCount = 0
         sentChunkCount = 0
         sendDurationTotalMilliseconds = 0
         sendDurationSampleCount = 0
+        droppedAudioChunkCount = 0
+        maximumObservedPendingAudioChunks = 0
     }
 
     private func waitForOutstandingAudioSends() async {
@@ -535,7 +631,6 @@ actor DeepgramLiveTranscriptionService {
     }
 
     private func audioSendDidFinish() {
-        inFlightAudioSendCount = max(0, inFlightAudioSendCount - 1)
         guard inFlightAudioSendCount == 0,
               let continuation = audioSendsDrainedContinuation else {
             return
@@ -543,6 +638,18 @@ actor DeepgramLiveTranscriptionService {
 
         audioSendsDrainedContinuation = nil
         continuation.resume()
+    }
+
+    private func audioSendLoopDidFinish(
+        generation: UUID,
+        webSocketTask finishedWebSocketTask: URLSessionWebSocketTask
+    ) {
+        guard generation == connectionGeneration,
+              webSocketTask == nil || webSocketTask === finishedWebSocketTask else {
+            return
+        }
+        audioSendLoopTask = nil
+        audioSendDidFinish()
     }
 
     private func logDiagnosticsIfNeeded(reason: String) {
@@ -555,7 +662,7 @@ actor DeepgramLiveTranscriptionService {
             ? sendDurationTotalMilliseconds / Double(sendDurationSampleCount)
             : 0
         Self.logger.info(
-            "Deepgram stream diagnostics reason=\(reason, privacy: .public) enqueued=\(self.enqueuedChunkCount, privacy: .public) sent=\(self.sentChunkCount, privacy: .public) avgSendMs=\(averageSendMilliseconds, privacy: .public)"
+            "Deepgram stream diagnostics reason=\(reason, privacy: .public) enqueued=\(self.enqueuedChunkCount, privacy: .public) sent=\(self.sentChunkCount, privacy: .public) pending=\(self.pendingAudioChunks.count, privacy: .public) maxPending=\(self.maximumObservedPendingAudioChunks, privacy: .public) dropped=\(self.droppedAudioChunkCount, privacy: .public) inFlight=\(self.inFlightAudioSendCount, privacy: .public) avgSendMs=\(averageSendMilliseconds, privacy: .public)"
         )
 
         lastDiagnosticsLogDate = now
@@ -563,6 +670,28 @@ actor DeepgramLiveTranscriptionService {
         sentChunkCount = 0
         sendDurationTotalMilliseconds = 0
         sendDurationSampleCount = 0
+        maximumObservedPendingAudioChunks = pendingAudioChunks.count
+    }
+
+    private func logResultLatencyIfNeeded(_ results: DeepgramResultsMessage) {
+        let now = Date()
+        guard now.timeIntervalSince(lastResultDiagnosticsLogDate) >= Self.diagnosticsInterval,
+              let firstAudioSentAtUptimeNanoseconds else {
+            return
+        }
+
+        let uptimeNow = DispatchTime.now().uptimeNanoseconds
+        let wallAudioSeconds = uptimeNow >= firstAudioSentAtUptimeNanoseconds
+            ? Double(uptimeNow - firstAudioSentAtUptimeNanoseconds) / 1_000_000_000
+            : 0
+        let resultAudioEndSeconds = (results.start ?? 0) + (results.duration ?? 0)
+        let resultAgeSeconds = max(0, wallAudioSeconds - resultAudioEndSeconds)
+        let sentAudioSeconds = Double(sentAudioSampleCount) / Double(AudioChunkEncoder.targetSampleRate)
+
+        Self.logger.info(
+            "Deepgram result latency resultEndSec=\(resultAudioEndSeconds, privacy: .public) wallSec=\(wallAudioSeconds, privacy: .public) sentAudioSec=\(sentAudioSeconds, privacy: .public) resultAgeSec=\(resultAgeSeconds, privacy: .public) isFinal=\(results.isFinal, privacy: .public) speechFinal=\(results.speechFinal, privacy: .public)"
+        )
+        lastResultDiagnosticsLogDate = now
     }
 
     private func makeRequest(
@@ -584,7 +713,8 @@ actor DeepgramLiveTranscriptionService {
                 URLQueryItem(name: "diarize", value: diarize ? "true" : "false"),
                 URLQueryItem(name: "utterances", value: utterances ? "true" : "false"),
                 URLQueryItem(name: "vad_events", value: "true"),
-                URLQueryItem(name: "endpointing", value: "500"),
+                URLQueryItem(name: "endpointing", value: "300"),
+                URLQueryItem(name: "utterance_end_ms", value: "1000"),
             ]
         )
     }
@@ -625,6 +755,8 @@ private struct DeepgramResultsMessage: Decodable {
     let channel: DeepgramResultsChannel
     let isFinal: Bool
     let speechFinal: Bool
+    let start: Double?
+    let duration: Double?
     let utterances: [DeepgramUtterance]?
 
     enum CodingKeys: String, CodingKey {
@@ -632,6 +764,8 @@ private struct DeepgramResultsMessage: Decodable {
         case channel
         case isFinal = "is_final"
         case speechFinal = "speech_final"
+        case start
+        case duration
         case utterances
     }
 }

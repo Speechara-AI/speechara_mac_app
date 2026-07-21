@@ -72,6 +72,8 @@ enum SystemAudioCaptureError: LocalizedError {
 }
 
 final class SystemAudioCaptureService: @unchecked Sendable {
+    private static let maximumLiveProcessingAgeNanoseconds: UInt64 = 750_000_000
+    private static let diagnosticsIntervalNanoseconds: UInt64 = 5_000_000_000
     private let processingQueue = DispatchQueue(label: "Speechara.SystemAudioCapture.Processing")
 
     private var tapID = AudioObjectID(kAudioObjectUnknown)
@@ -83,6 +85,9 @@ final class SystemAudioCaptureService: @unchecked Sendable {
     private var liveAudioEncoder = AudioChunkEncoder()
     private var captureError: Error?
     private var isProcessingAudio = false
+    private var lastDiagnosticsUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+    private var maximumProcessingAgeMilliseconds = 0.0
+    private var droppedStaleChunkCount = 0
 
     func setLiveAudioDataHandler(_ handler: (@Sendable (Data) -> Void)?) {
         processingQueue.sync {
@@ -159,6 +164,9 @@ final class SystemAudioCaptureService: @unchecked Sendable {
                 liveAudioEncoder = AudioChunkEncoder()
                 captureError = nil
                 isProcessingAudio = true
+                lastDiagnosticsUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+                maximumProcessingAgeMilliseconds = 0
+                droppedStaleChunkCount = 0
             }
 
             var newIOProcID: AudioDeviceIOProcID?
@@ -224,7 +232,11 @@ final class SystemAudioCaptureService: @unchecked Sendable {
             return
         }
 
-        let chunk = CapturedAudioChunk(buffers: buffers, frameCount: frameCount)
+        let chunk = CapturedAudioChunk(
+            buffers: buffers,
+            frameCount: frameCount,
+            capturedAtUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds
+        )
         processingQueue.async { [weak self] in
             self?.processCapturedChunk(chunk)
         }
@@ -232,6 +244,19 @@ final class SystemAudioCaptureService: @unchecked Sendable {
 
     private func processCapturedChunk(_ chunk: CapturedAudioChunk) {
         guard isProcessingAudio, let tapFormat else {
+            return
+        }
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        let processingAgeNanoseconds = now >= chunk.capturedAtUptimeNanoseconds
+            ? now - chunk.capturedAtUptimeNanoseconds
+            : 0
+        let processingAgeMilliseconds = Double(processingAgeNanoseconds) / 1_000_000
+        maximumProcessingAgeMilliseconds = max(maximumProcessingAgeMilliseconds, processingAgeMilliseconds)
+
+        if processingAgeNanoseconds > Self.maximumLiveProcessingAgeNanoseconds {
+            droppedStaleChunkCount += 1
+            logCaptureDiagnosticsIfNeeded(now: now, reason: "drop-stale")
             return
         }
 
@@ -243,9 +268,23 @@ final class SystemAudioCaptureService: @unchecked Sendable {
             }
 
             liveAudioDataHandler?(encodedAudio)
+            logCaptureDiagnosticsIfNeeded(now: now, reason: "processed")
         } catch {
             captureError = error
         }
+    }
+
+    private func logCaptureDiagnosticsIfNeeded(now: UInt64, reason: String) {
+        guard now >= lastDiagnosticsUptimeNanoseconds,
+              now - lastDiagnosticsUptimeNanoseconds >= Self.diagnosticsIntervalNanoseconds else {
+            return
+        }
+        SpeecharaDiagnostics.audio.info(
+            "system capture diagnostics reason=\(reason) maxProcessingAgeMs=\(Int(self.maximumProcessingAgeMilliseconds)) droppedStale=\(self.droppedStaleChunkCount)"
+        )
+        lastDiagnosticsUptimeNanoseconds = now
+        maximumProcessingAgeMilliseconds = 0
+        droppedStaleChunkCount = 0
     }
 
     private func stopCaptureIfNeeded() throws {
@@ -406,6 +445,7 @@ final class SystemAudioCaptureService: @unchecked Sendable {
 private struct CapturedAudioChunk {
     let buffers: [CapturedAudioBuffer]
     let frameCount: AVAudioFrameCount
+    let capturedAtUptimeNanoseconds: UInt64
 }
 
 private struct CapturedAudioBuffer {

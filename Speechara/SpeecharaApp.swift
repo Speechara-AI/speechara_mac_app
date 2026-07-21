@@ -5,6 +5,20 @@ import CoreGraphics
 import OSLog
 import SwiftUI
 
+enum SpeecharaDiagnostics {
+    static let app = Logger(subsystem: "ai.speechara.mac", category: "App")
+    static let session = Logger(subsystem: "ai.speechara.mac", category: "Session")
+    static let audio = Logger(subsystem: "ai.speechara.mac", category: "Audio")
+    static let transcription = Logger(subsystem: "ai.speechara.mac", category: "Transcription")
+    static let translation = Logger(subsystem: "ai.speechara.mac", category: "Translation")
+    static let history = Logger(subsystem: "ai.speechara.mac", category: "History")
+    static let auth = Logger(subsystem: "ai.speechara.mac", category: "Auth")
+
+    static func textSummary(_ text: String, limit: Int = 100) -> String {
+        String(text.replacingOccurrences(of: "\n", with: " ").prefix(limit))
+    }
+}
+
 extension Notification.Name {
     static let speecharaOpenMainWindow = Notification.Name("speechara.openMainWindow")
     static let speecharaInterfaceLanguageWillChange = Notification.Name("speechara.interfaceLanguageWillChange")
@@ -286,6 +300,12 @@ private struct SpeecharaMenuBarIcon: View {
 private struct SpeecharaListeningMiniView: View {
     @Environment(\.openWindow) private var openWindow
     @EnvironmentObject private var viewModel: SubtitleViewModel
+    @AppStorage("speechara.miniWindowLayout") private var layoutRawValue = SpeecharaMiniWindowLayout.columns.rawValue
+    @AppStorage("speechara.miniWindowSplit") private var splitFraction = 0.5
+
+    private var layout: SpeecharaMiniWindowLayout {
+        SpeecharaMiniWindowLayout(rawValue: layoutRawValue) ?? .columns
+    }
 
     private var statusTitle: String {
         if viewModel.isBusy {
@@ -304,16 +324,7 @@ private struct SpeecharaListeningMiniView: View {
     }
 
     private var transcriptViewerText: String {
-        let livePreview = viewModel.liveSubtitlePreview.trimmingCharacters(in: .whitespacesAndNewlines)
         let transcript = viewModel.subtitlesText.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if !transcript.isEmpty, !livePreview.isEmpty {
-            return "\(transcript)\n\(livePreview)"
-        }
-
-        if !livePreview.isEmpty {
-            return livePreview
-        }
 
         if !transcript.isEmpty {
             return transcript
@@ -323,15 +334,10 @@ private struct SpeecharaListeningMiniView: View {
     }
 
     private var translationViewerText: String {
-        let livePreview = viewModel.liveTranslationPreview.trimmingCharacters(in: .whitespacesAndNewlines)
         let translation = viewModel.translatedText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if !translation.isEmpty {
             return translation
-        }
-
-        if !livePreview.isEmpty {
-            return livePreview
         }
 
         return viewModel.translationPlaceholderText
@@ -358,6 +364,17 @@ private struct SpeecharaListeningMiniView: View {
 
                 Spacer()
 
+                Picker("", selection: $layoutRawValue) {
+                    Image(systemName: "rectangle.split.2x1")
+                        .tag(SpeecharaMiniWindowLayout.columns.rawValue)
+                    Image(systemName: "rectangle.split.1x2")
+                        .tag(SpeecharaMiniWindowLayout.rows.rawValue)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 68)
+                .help("Switch transcript layout")
+
                 Button {
                     viewModel.stopActiveSession()
                 } label: {
@@ -367,24 +384,11 @@ private struct SpeecharaListeningMiniView: View {
             }
 
             if viewModel.isTranslationEnabled {
-                HStack(spacing: 12) {
-                    SpeecharaMiniTranscriptPanel(
-                        title: SL("Live transcript"),
-                        text: transcriptViewerText
-                    )
-
-                    SpeecharaMiniTranscriptPanel(
-                        title: viewModel.translationPanelTitle,
-                        text: translationViewerText
-                    )
-                }
+                resizableTranscriptLayout
                 .layoutPriority(1)
             } else {
-                SpeecharaMiniTranscriptPanel(
-                    title: SL("Live transcript"),
-                    text: transcriptViewerText
-                )
-                .layoutPriority(1)
+                transcriptPanel
+                    .layoutPriority(1)
             }
 
             HStack(spacing: 10) {
@@ -421,49 +425,145 @@ private struct SpeecharaListeningMiniView: View {
         .frame(minWidth: 420, idealWidth: 720, maxWidth: .infinity, minHeight: 300, idealHeight: 420, maxHeight: .infinity)
         .background(SpeecharaFloatingMiniWindowConfigurator())
     }
+
+    private var transcriptPanel: some View {
+        SpeecharaMiniTranscriptPanel(
+            title: SL("Live transcript"),
+            text: transcriptViewerText,
+            draftText: viewModel.liveSubtitlePreview,
+            systemImage: "waveform"
+        )
+    }
+
+    private var translationPanel: some View {
+        SpeecharaMiniTranscriptPanel(
+            title: viewModel.translationPanelTitle,
+            text: translationViewerText,
+            draftText: viewModel.liveTranslationPreview,
+            systemImage: "character.bubble"
+        )
+    }
+
+    private var resizableTranscriptLayout: some View {
+        GeometryReader { proxy in
+            let gap: CGFloat = 6
+            let dividerSize: CGFloat = 8
+            let available = layout == .columns ? proxy.size.width : proxy.size.height
+            let firstSize = max(90, min(available - dividerSize - 90, available * splitFraction))
+            let secondSize = max(90, available - dividerSize - firstSize)
+
+            Group {
+                if layout == .columns {
+                    HStack(spacing: gap) {
+                        transcriptPanel.frame(width: firstSize)
+                        splitDivider(available: proxy.size.width)
+                        translationPanel.frame(width: secondSize)
+                    }
+                } else {
+                    VStack(spacing: gap) {
+                        transcriptPanel.frame(height: firstSize)
+                        splitDivider(available: proxy.size.height)
+                        translationPanel.frame(height: secondSize)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .coordinateSpace(name: "speechara-mini-split")
+        }
+    }
+
+    private func splitDivider(available: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 2, style: .continuous)
+            .fill(Color.secondary.opacity(0.20))
+            .frame(
+                width: layout == .columns ? 3 : 24,
+                height: layout == .columns ? 24 : 3
+            )
+            .frame(
+                width: layout == .columns ? 8 : nil,
+                height: layout == .columns ? nil : 8
+            )
+            .contentShape(Rectangle())
+            .onHover { isHovering in
+                if isHovering {
+                    (layout == .columns ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .overlay {
+                Image(systemName: layout == .columns ? "arrow.left.and.right" : "arrow.up.and.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.secondary.opacity(0.8))
+            }
+            .gesture(
+                DragGesture(coordinateSpace: .named("speechara-mini-split"))
+                    .onChanged { value in
+                        let position = layout == .columns ? value.location.x : value.location.y
+                        splitFraction = max(0.2, min(0.8, position / max(1, available)))
+                    }
+            )
+            .accessibilityLabel("Resize transcript panels")
+    }
+}
+
+private enum SpeecharaMiniWindowLayout: String {
+    case columns
+    case rows
 }
 
 private struct SpeecharaMiniTranscriptPanel: View {
     let title: String
     let text: String
+    let draftText: String
+    let systemImage: String
     private let bottomAnchor = "mini-transcript-bottom-anchor"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.system(size: 12, weight: .bold, design: .rounded))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
+            HStack(spacing: 6) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.tint)
+                Text(title)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Text(text)
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                        .textSelection(.enabled)
-                        .padding(12)
-                        .padding(.bottom, 8)
+            VStack(spacing: 0) {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        Text(text)
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                            .textSelection(.enabled)
+                            .padding(12)
 
-                    Color.clear
-                        .frame(height: 1)
-                        .id(bottomAnchor)
+                        Color.clear
+                            .frame(height: 1)
+                            .id(bottomAnchor)
+                    }
+                    .onAppear {
+                        scrollToBottom(using: proxy)
+                    }
+                    .onChange(of: text) { _ in
+                        scrollToBottom(using: proxy)
+                    }
                 }
-                .onAppear {
-                    scrollToBottom(using: proxy)
-                }
-                .onChange(of: text) { _ in
-                    scrollToBottom(using: proxy)
-                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                SpeecharaMiniDraftStrip(text: draftText)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.secondary.opacity(0.08))
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color(nsColor: .textBackgroundColor).opacity(0.72))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.secondary.opacity(0.10), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.secondary.opacity(0.14), lineWidth: 1)
             )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -472,6 +572,30 @@ private struct SpeecharaMiniTranscriptPanel: View {
     private func scrollToBottom(using proxy: ScrollViewProxy) {
         DispatchQueue.main.async {
             proxy.scrollTo(bottomAnchor, anchor: .bottom)
+        }
+    }
+}
+
+private struct SpeecharaMiniDraftStrip: View {
+    let text: String
+
+    private var cleanText: String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        if !cleanText.isEmpty {
+            Text(cleanText)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .truncationMode(.head)
+                .frame(maxWidth: .infinity, minHeight: 36, maxHeight: 36, alignment: .leading)
+                .padding(.horizontal, 10)
+                .background(.ultraThinMaterial)
+                .overlay(alignment: .top) {
+                    Divider().opacity(0.55)
+                }
         }
     }
 }
@@ -501,6 +625,7 @@ private struct SpeecharaFloatingMiniWindowConfigurator: NSViewRepresentable {
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
             window.styleMask.insert(.resizable)
+            window.isMovableByWindowBackground = false
             window.minSize = NSSize(width: 420, height: 300)
             window.maxSize = NSSize(width: 960, height: 680)
             window.identifier = NSUserInterfaceItemIdentifier("speechara-listening-mini")

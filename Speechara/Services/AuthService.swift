@@ -411,6 +411,10 @@ enum AuthServiceError: LocalizedError {
     }
 }
 
+struct MfaRequiredError: Error {
+    let challenge: MfaChallenge
+}
+
 final class AuthService {
     static let shared = AuthService()
 
@@ -421,6 +425,12 @@ final class AuthService {
     private struct DesktopAuthExchangeRequest: Encodable {
         let code: String
         let state: String
+        let codeVerifier: String
+
+        enum CodingKeys: String, CodingKey {
+            case code, state
+            case codeVerifier = "code_verifier"
+        }
     }
 
     private struct MicrosoftAPIExchangeRequest: Encodable {
@@ -677,7 +687,11 @@ final class AuthService {
                 throw AuthServiceError.invalidCallback
             }
 
-            let items = Dictionary(uniqueKeysWithValues: components.queryItems?.map { ($0.name, $0.value ?? "") } ?? [])
+            let queryItems = components.queryItems ?? []
+            guard Set(queryItems.map(\.name)).count == queryItems.count else {
+                throw AuthServiceError.invalidCallback
+            }
+            let items = Dictionary(uniqueKeysWithValues: queryItems.map { ($0.name, $0.value ?? "") })
 
             if let error = items["error"], !error.isEmpty {
                 let description = items["error_description"]?.replacingOccurrences(of: "+", with: " ") ?? error
@@ -709,35 +723,6 @@ final class AuthService {
         var codeChallenge: String {
             let digest = SHA256.hash(data: Data(codeVerifier.utf8))
             return Data(digest).base64URLEncodedString()
-        }
-
-        private static func randomURLSafeString(length: Int) throws -> String {
-            var combined = ""
-
-            while combined.count < length {
-                var bytes = [UInt8](repeating: 0, count: 32)
-                let byteCount = bytes.count
-                let status = bytes.withUnsafeMutableBytes { buffer in
-                    guard let baseAddress = buffer.baseAddress else {
-                        return errSecParam
-                    }
-                    return SecRandomCopyBytes(kSecRandomDefault, byteCount, baseAddress)
-                }
-                guard status == errSecSuccess else {
-                    throw AuthServiceError.requestFailed("Speechara could not create secure OAuth randomness.")
-                }
-                combined.append(Data(bytes).base64URLEncodedString())
-            }
-
-            return String(combined.prefix(length))
-        }
-    }
-
-    private struct DesktopOAuthTransaction {
-        let state: String
-
-        init() throws {
-            state = try Self.randomURLSafeString(length: 32)
         }
 
         private static func randomURLSafeString(length: Int) throws -> String {
@@ -831,7 +816,7 @@ final class AuthService {
 
     func signInWithGoogle() async throws -> AuthSession {
         let configuration = try makeConfiguration()
-        let transaction = try DesktopOAuthTransaction()
+        let transaction = try OAuthPKCETransaction()
         let callbackWaiter = DesktopOAuthCallbackWaiter()
 
         activeDesktopCallbackWaiter = callbackWaiter
@@ -842,7 +827,8 @@ final class AuthService {
 
         let authorizationURL = try makeGoogleDesktopAuthorizationURL(
             configuration: configuration,
-            state: transaction.state
+            state: transaction.state,
+            codeChallenge: transaction.codeChallenge
         )
 
         let didOpenBrowser = await MainActor.run {
@@ -871,7 +857,8 @@ final class AuthService {
         let authenticatedSession = try await exchangeDesktopAuthCode(
             configuration: configuration,
             code: payload.code,
-            state: payload.state
+            state: payload.state,
+            codeVerifier: transaction.codeVerifier
         )
 
         try persistSession(authenticatedSession)
@@ -1208,7 +1195,8 @@ final class AuthService {
 
     private func makeGoogleDesktopAuthorizationURL(
         configuration: Configuration,
-        state: String
+        state: String,
+        codeChallenge: String
     ) throws -> URL {
         var components = URLComponents(
             url: configuration.baseURL.appendingPathComponent("api/auth/google/desktop/start"),
@@ -1216,6 +1204,8 @@ final class AuthService {
         )
         components?.queryItems = [
             URLQueryItem(name: "state", value: state),
+            URLQueryItem(name: "code_challenge", value: codeChallenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
         ]
 
         guard let url = components?.url else {
@@ -1289,21 +1279,15 @@ final class AuthService {
     private func exchangeDesktopAuthCode(
         configuration: Configuration,
         code: String,
-        state: String
+        state: String,
+        codeVerifier: String
     ) async throws -> AuthSession {
-        let requestBody = DesktopAuthExchangeRequest(
-            code: code,
-            state: state
-        )
-
-        let response: SessionResponse = try await performJSONRequest(
+        try await performAuthSessionRequest(
             url: configuration.baseURL.appendingPathComponent("api/auth/desktop/exchange"),
             method: "POST",
-            body: requestBody,
+            body: DesktopAuthExchangeRequest(code: code, state: state, codeVerifier: codeVerifier),
             bearerToken: nil
         )
-
-        return try response.session(fallbackRefreshToken: nil)
     }
 
     private func exchangeAppleAuthorization(
@@ -1579,6 +1563,10 @@ final class AuthService {
     }
 
     private func decodeSessionResponse(from data: Data) throws -> SessionResponse {
+        if let challenge = try? decoder.decode(EmailLoginMfaChallengeResponse.self, from: data),
+           challenge.code == "MFA_REQUIRED" {
+            throw MfaRequiredError(challenge: challenge.challenge)
+        }
         guard !data.isEmpty else {
             throw AuthServiceError.invalidResponse
         }
@@ -1676,6 +1664,7 @@ final class AuthSessionStore: ObservableObject {
     @Published private(set) var isRestoringSession = true
     @Published private(set) var isAuthenticating = false
     @Published private(set) var isSigningOut = false
+    @Published private(set) var pendingMfaChallenge: MfaChallenge?
     @Published private(set) var activeAuthenticationProvider: AuthenticationProvider?
     @Published private(set) var errorMessage: String?
 
@@ -1749,6 +1738,7 @@ final class AuthSessionStore: ObservableObject {
             return
         }
 
+        pendingMfaChallenge = nil
         errorMessage = nil
         isAuthenticating = true
         activeAuthenticationProvider = .google
@@ -1763,6 +1753,8 @@ final class AuthSessionStore: ObservableObject {
             do {
                 let authenticatedSession = try await authService.signInWithGoogle()
                 session = authenticatedSession
+            } catch let error as MfaRequiredError {
+                pendingMfaChallenge = error.challenge
             } catch is CancellationError {
                 errorMessage = AuthServiceError.userCancelled.localizedDescription
             } catch {
@@ -1776,6 +1768,7 @@ final class AuthSessionStore: ObservableObject {
             return
         }
 
+        pendingMfaChallenge = nil
         errorMessage = nil
         isAuthenticating = true
         activeAuthenticationProvider = .microsoft
@@ -1790,6 +1783,8 @@ final class AuthSessionStore: ObservableObject {
             do {
                 let authenticatedSession = try await authService.signInWithMicrosoft()
                 session = authenticatedSession
+            } catch let error as MfaRequiredError {
+                pendingMfaChallenge = error.challenge
             } catch is CancellationError {
                 errorMessage = AuthServiceError.userCancelled.localizedDescription
             } catch {
@@ -1803,6 +1798,7 @@ final class AuthSessionStore: ObservableObject {
             return
         }
 
+        pendingMfaChallenge = nil
         errorMessage = nil
         isAuthenticating = true
         activeAuthenticationProvider = .apple
@@ -1817,6 +1813,8 @@ final class AuthSessionStore: ObservableObject {
             do {
                 let authenticatedSession = try await authService.signInWithApple()
                 session = authenticatedSession
+            } catch let error as MfaRequiredError {
+                pendingMfaChallenge = error.challenge
             } catch is CancellationError {
                 errorMessage = AuthServiceError.userCancelled.localizedDescription
             } catch {
@@ -1881,9 +1879,11 @@ final class AuthSessionStore: ObservableObject {
     }
 
     func verifyEmailMfa(challengeId: String, email: String, code: String) async -> AuthSession? {
-        await runEmailAuthenticationOperation {
+        let result = await runEmailAuthenticationOperation {
             try await self.authService.verifyEmailMfa(challengeId: challengeId, email: email, code: code)
         }
+        if result != nil { pendingMfaChallenge = nil }
+        return result
     }
 
     func resendEmailCode(challengeId: String, email: String) async -> EmailChallenge? {
@@ -1914,6 +1914,8 @@ final class AuthSessionStore: ObservableObject {
             session = nil
         }
     }
+
+    func clearPendingMfa() { pendingMfaChallenge = nil }
 
     func clearError() {
         errorMessage = nil
@@ -1946,6 +1948,9 @@ final class AuthSessionStore: ObservableObject {
             }
 
             return value
+        } catch let error as MfaRequiredError {
+            pendingMfaChallenge = error.challenge
+            return nil
         } catch {
             errorMessage = error.localizedDescription
             return nil

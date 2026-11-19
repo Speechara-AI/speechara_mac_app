@@ -54,8 +54,10 @@ struct AuthenticationView: View {
                     header
 
                     VStack(alignment: .leading, spacing: 18) {
-                        socialButtons
-                        dividerRow
+                        if authStore.pendingMfaChallenge == nil {
+                            socialButtons
+                            dividerRow
+                        }
                         emailContent
                         messageArea
                         footer
@@ -84,6 +86,12 @@ struct AuthenticationView: View {
             }
         }
         .frame(minWidth: 880, minHeight: 700)
+        .onReceive(authStore.$pendingMfaChallenge) { challenge in
+            if let challenge {
+                mfaCode = ""
+                emailFlow = .loginMfa(challenge)
+            }
+        }
     }
 
     private var header: some View {
@@ -344,6 +352,7 @@ struct AuthenticationView: View {
                 .disabled(authStore.isAuthenticating)
 
                 Button(SL("Back")) {
+                    authStore.clearPendingMfa()
                     emailFlow = .signIn
                     mfaCode = ""
                     clearMessages()

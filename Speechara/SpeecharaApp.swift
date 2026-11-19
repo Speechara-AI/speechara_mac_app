@@ -20,8 +20,66 @@ enum SpeecharaDiagnostics {
 }
 
 extension Notification.Name {
+    static let speecharaMeetingHistoryDidChange = Notification.Name("speechara.meetingHistoryDidChange")
     static let speecharaOpenMainWindow = Notification.Name("speechara.openMainWindow")
     static let speecharaInterfaceLanguageWillChange = Notification.Name("speechara.interfaceLanguageWillChange")
+}
+
+@MainActor
+private final class SpeecharaPresentationStore: ObservableObject {
+    static let shared = SpeecharaPresentationStore()
+
+    @Published private(set) var isBackgroundOnly = false
+    @Published private(set) var miniWindowGeneration = UUID()
+
+    private init() {}
+
+    func enterBackgroundOnlyMode() {
+        guard !isBackgroundOnly else {
+            return
+        }
+
+        isBackgroundOnly = true
+        SpeecharaDiagnostics.app.notice("entering background-only presentation mode")
+        SpeecharaMiniWindowCoordinator.hideAllWindowsForBackgroundMode()
+
+        if !NSApp.setActivationPolicy(.accessory) {
+            SpeecharaDiagnostics.app.error("failed to switch activation policy to accessory")
+        }
+    }
+
+    func restoreApplication(openWindow: @escaping @MainActor () -> Void) {
+        let wasBackgroundOnly = isBackgroundOnly
+        isBackgroundOnly = false
+        if wasBackgroundOnly {
+            miniWindowGeneration = UUID()
+        }
+        SpeecharaDiagnostics.app.notice("restoring regular application presentation mode")
+
+        let revealWindow = {
+            SpeecharaMiniWindowCoordinator.restoreWindowsForUserRequest()
+            openWindow()
+            DispatchQueue.main.async {
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
+
+        guard NSApp.activationPolicy() != .regular else {
+            revealWindow()
+            return
+        }
+
+        if !NSApp.setActivationPolicy(.regular) {
+            SpeecharaDiagnostics.app.error("failed to restore regular activation policy")
+        }
+
+        // AppKit needs one main-loop pass after becoming a regular application
+        // before a SwiftUI window can reliably become key on every macOS version.
+        Task { @MainActor in
+            await Task.yield()
+            revealWindow()
+        }
+    }
 }
 
 @main
@@ -31,10 +89,15 @@ struct SpeecharaApp: App {
     @StateObject private var subtitleViewModel: SubtitleViewModel
     @StateObject private var localizationStore = SpeecharaLocalizationStore.shared
     @StateObject private var meetingDetectionStore: MeetingDetectionStore
+    @StateObject private var presentationStore = SpeecharaPresentationStore.shared
     @AppStorage("speechara.appearanceMode") private var appearanceModeRawValue = SpeecharaAppearanceMode.system.rawValue
 
     private var appearanceMode: SpeecharaAppearanceMode {
         SpeecharaAppearanceMode(rawValue: appearanceModeRawValue) ?? .system
+    }
+
+    private var interfaceLayoutDirection: LayoutDirection {
+        localizationStore.language.isRightToLeft ? .rightToLeft : .leftToRight
     }
 
     init() {
@@ -43,6 +106,7 @@ struct SpeecharaApp: App {
 #endif
         SpeecharaLocalizationStore.shared.installBundleOverrideIfNeeded()
         let viewModel = SubtitleViewModel()
+        SpeecharaAppDelegate.subtitleViewModel = viewModel
         _subtitleViewModel = StateObject(wrappedValue: viewModel)
         _meetingDetectionStore = StateObject(wrappedValue: MeetingDetectionStore(viewModel: viewModel))
     }
@@ -58,7 +122,9 @@ struct SpeecharaApp: App {
                 .environmentObject(subtitleViewModel)
                 .environmentObject(localizationStore)
                 .environmentObject(meetingDetectionStore)
+                .environmentObject(presentationStore)
                 .environment(\.locale, localizationStore.locale)
+                .environment(\.layoutDirection, interfaceLayoutDirection)
                 .preferredColorScheme(appearanceMode.preferredColorScheme)
                 .id(localizationStore.language.rawValue)
         }
@@ -72,7 +138,9 @@ struct SpeecharaApp: App {
                 .environmentObject(subtitleViewModel)
                 .environmentObject(localizationStore)
                 .environmentObject(meetingDetectionStore)
+                .environmentObject(presentationStore)
                 .environment(\.locale, localizationStore.locale)
+                .environment(\.layoutDirection, interfaceLayoutDirection)
                 .preferredColorScheme(appearanceMode.preferredColorScheme)
                 .id(localizationStore.language.rawValue)
         }
@@ -82,10 +150,13 @@ struct SpeecharaApp: App {
                 .environmentObject(subtitleViewModel)
                 .environmentObject(localizationStore)
                 .environmentObject(meetingDetectionStore)
+                .environmentObject(presentationStore)
                 .environment(\.locale, localizationStore.locale)
+                .environment(\.layoutDirection, interfaceLayoutDirection)
                 .preferredColorScheme(appearanceMode.preferredColorScheme)
-                .id(localizationStore.language.rawValue)
+                .id("\(localizationStore.language.rawValue)-\(presentationStore.miniWindowGeneration.uuidString)")
         }
+        .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
 
         MenuBarExtra {
@@ -94,7 +165,9 @@ struct SpeecharaApp: App {
                 .environmentObject(subtitleViewModel)
                 .environmentObject(localizationStore)
                 .environmentObject(meetingDetectionStore)
+                .environmentObject(presentationStore)
                 .environment(\.locale, localizationStore.locale)
+                .environment(\.layoutDirection, interfaceLayoutDirection)
                 .id(localizationStore.language.rawValue)
         } label: {
             SpeecharaMenuBarLabel(
@@ -107,6 +180,7 @@ struct SpeecharaApp: App {
             .environmentObject(authStore)
             .environmentObject(subtitleViewModel)
             .environmentObject(meetingDetectionStore)
+            .environmentObject(presentationStore)
         }
         .menuBarExtraStyle(.menu)
     }
@@ -117,6 +191,7 @@ private struct SpeecharaBackgroundCoordinatorView: View {
     @EnvironmentObject private var authStore: AuthSessionStore
     @EnvironmentObject private var viewModel: SubtitleViewModel
     @EnvironmentObject private var meetingDetectionStore: MeetingDetectionStore
+    @EnvironmentObject private var presentationStore: SpeecharaPresentationStore
     @AppStorage("speechara.isMiniWindowEnabled") private var isMiniWindowEnabled = true
     @State private var suppressMiniWindowUntil = Date.distantPast
     private let miniWindowVisibilityTimer = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
@@ -128,12 +203,17 @@ private struct SpeecharaBackgroundCoordinatorView: View {
                     viewModel: viewModel,
                     startListening: {
                         startListeningAfterAuthRefresh()
+                    },
+                    shouldSuppressPrompts: {
+                        presentationStore.isBackgroundOnly
                     }
                 )
             }
             .onReceive(NotificationCenter.default.publisher(for: .speecharaInterfaceLanguageWillChange)) { _ in
                 suppressMiniWindowUntil = Date().addingTimeInterval(1.5)
-                SpeecharaMiniWindowCoordinator.closeMiniWindow()
+                SpeecharaMiniWindowCoordinator.closeMiniWindow(
+                    restoringMainWindow: !presentationStore.isBackgroundOnly
+                )
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
@@ -142,6 +222,10 @@ private struct SpeecharaBackgroundCoordinatorView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                 synchronizeMiniWindowVisibility()
+                if authStore.session != nil { viewModel.resumeMeetingHistorySync() }
+            }
+            .task(id: authStore.session?.user.id) {
+                if authStore.session != nil { viewModel.resumeMeetingHistorySync() }
             }
             .onReceive(miniWindowVisibilityTimer) { _ in
                 synchronizeMiniWindowVisibility()
@@ -156,17 +240,30 @@ private struct SpeecharaBackgroundCoordinatorView: View {
             do {
                 try await authStore.ensureActiveSession()
                 viewModel.promptAndStartListening(includeMicrophone: viewModel.startsWithMicrophoneEnabled)
-                openWindow(id: "speechara-main")
-                NSApp.activate(ignoringOtherApps: true)
+                revealMainWindowUnlessBackgroundOnly()
             } catch {
                 viewModel.showErrorMessage(authStore.errorMessage ?? error.localizedDescription)
-                openWindow(id: "speechara-main")
-                NSApp.activate(ignoringOtherApps: true)
+                revealMainWindowUnlessBackgroundOnly()
             }
         }
     }
 
+    private func revealMainWindowUnlessBackgroundOnly() {
+        guard !presentationStore.isBackgroundOnly else {
+            return
+        }
+
+        presentationStore.restoreApplication {
+            openWindow(id: "speechara-main")
+        }
+    }
+
     private func synchronizeMiniWindowVisibility() {
+        guard !presentationStore.isBackgroundOnly else {
+            SpeecharaMiniWindowCoordinator.closeMiniWindow(restoringMainWindow: false)
+            return
+        }
+
         guard isMiniWindowEnabled,
               viewModel.hasActiveSession,
               Date() >= suppressMiniWindowUntil,
@@ -182,12 +279,18 @@ private struct SpeecharaBackgroundCoordinatorView: View {
             return
         }
 
+        SpeecharaDiagnostics.app.notice(
+            "opening mini window transcriptChars=\(viewModel.subtitlesText.count, privacy: .public) translationChars=\(viewModel.translatedText.count, privacy: .public) transcriptEntries=\(viewModel.transcriptEntries.count, privacy: .public) translationEntries=\(viewModel.translationEntries.count, privacy: .public)"
+        )
         openWindow(id: "speechara-listening-mini")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             guard isMiniWindowEnabled,
                   viewModel.hasActiveSession,
+                  !presentationStore.isBackgroundOnly,
                   SpeecharaMiniWindowCoordinator.shouldPresentMiniWindow() else {
-                SpeecharaMiniWindowCoordinator.closeMiniWindow()
+                SpeecharaMiniWindowCoordinator.closeMiniWindow(
+                    restoringMainWindow: !presentationStore.isBackgroundOnly
+                )
                 return
             }
 
@@ -196,7 +299,22 @@ private struct SpeecharaBackgroundCoordinatorView: View {
     }
 }
 
+@MainActor
 final class SpeecharaAppDelegate: NSObject, NSApplicationDelegate {
+    static weak var subtitleViewModel: SubtitleViewModel?
+    private var isFinishingMeeting = false
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let viewModel = Self.subtitleViewModel else { return .terminateNow }
+        guard !isFinishingMeeting else { return .terminateLater }
+        isFinishingMeeting = true
+        Task { @MainActor in
+            await viewModel.prepareForTermination()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
 
@@ -234,6 +352,7 @@ final class SpeecharaAppDelegate: NSObject, NSApplicationDelegate {
 private struct SpeecharaMenuBarLabel: View {
     @Environment(\.openWindow) private var openWindow
     @EnvironmentObject private var authStore: AuthSessionStore
+    @EnvironmentObject private var presentationStore: SpeecharaPresentationStore
     let isActive: Bool
     @ObservedObject var viewModel: SubtitleViewModel
     let meetingDetectionStore: MeetingDetectionStore
@@ -245,12 +364,16 @@ private struct SpeecharaMenuBarLabel: View {
                     viewModel: viewModel,
                     startListening: {
                         startListeningAfterAuthRefresh()
+                    },
+                    shouldSuppressPrompts: {
+                        presentationStore.isBackgroundOnly
                     }
                 )
             }
             .onReceive(NotificationCenter.default.publisher(for: .speecharaOpenMainWindow)) { _ in
-                openWindow(id: "speechara-main")
-                NSApp.activate(ignoringOtherApps: true)
+                presentationStore.restoreApplication {
+                    openWindow(id: "speechara-main")
+                }
             }
     }
 
@@ -259,13 +382,21 @@ private struct SpeecharaMenuBarLabel: View {
             do {
                 try await authStore.ensureActiveSession()
                 viewModel.promptAndStartListening(includeMicrophone: viewModel.startsWithMicrophoneEnabled)
-                openWindow(id: "speechara-main")
-                NSApp.activate(ignoringOtherApps: true)
+                revealMainWindowUnlessBackgroundOnly()
             } catch {
                 viewModel.showErrorMessage(authStore.errorMessage ?? error.localizedDescription)
-                openWindow(id: "speechara-main")
-                NSApp.activate(ignoringOtherApps: true)
+                revealMainWindowUnlessBackgroundOnly()
             }
+        }
+    }
+
+    private func revealMainWindowUnlessBackgroundOnly() {
+        guard !presentationStore.isBackgroundOnly else {
+            return
+        }
+
+        presentationStore.restoreApplication {
+            openWindow(id: "speechara-main")
         }
     }
 }
@@ -300,6 +431,7 @@ private struct SpeecharaMenuBarIcon: View {
 private struct SpeecharaListeningMiniView: View {
     @Environment(\.openWindow) private var openWindow
     @EnvironmentObject private var viewModel: SubtitleViewModel
+    @EnvironmentObject private var presentationStore: SpeecharaPresentationStore
     @AppStorage("speechara.miniWindowLayout") private var layoutRawValue = SpeecharaMiniWindowLayout.columns.rawValue
     @AppStorage("speechara.miniWindowSplit") private var splitFraction = 0.5
 
@@ -330,6 +462,10 @@ private struct SpeecharaListeningMiniView: View {
             return transcript
         }
 
+        if !viewModel.liveSubtitlePreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return ""
+        }
+
         return SL("Waiting for speech...")
     }
 
@@ -338,6 +474,10 @@ private struct SpeecharaListeningMiniView: View {
 
         if !translation.isEmpty {
             return translation
+        }
+
+        if !viewModel.liveTranslationPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return ""
         }
 
         return viewModel.translationPlaceholderText
@@ -375,12 +515,8 @@ private struct SpeecharaListeningMiniView: View {
                 .frame(width: 68)
                 .help("Switch transcript layout")
 
-                Button {
-                    viewModel.stopActiveSession()
-                } label: {
-                    Label(SL("Stop Listening"), systemImage: "stop.fill")
-                }
-                .disabled(!viewModel.hasActiveSession || viewModel.isBusy || viewModel.isMicrophoneBusy)
+                miniMicrophoneControl
+                miniStopButton
             }
 
             if viewModel.isTranslationEnabled {
@@ -391,39 +527,164 @@ private struct SpeecharaListeningMiniView: View {
                     .layoutPriority(1)
             }
 
-            HStack(spacing: 10) {
-                Button(SL("Expand Speechara")) {
-                    openWindow(id: "speechara-main")
-                    NSApp.activate(ignoringOtherApps: true)
-                    SpeecharaMiniWindowCoordinator.closeMiniWindow()
-                }
-
-                Spacer()
-
-                Menu(SL("Select microphone")) {
-                    if viewModel.hasAvailableMicrophones {
-                        ForEach(viewModel.availableMicrophones) { device in
-                            Button {
-                                viewModel.selectMicrophone(device.id)
-                            } label: {
-                                Label(
-                                    device.name,
-                                    systemImage: device.id == viewModel.selectedMicrophoneID ? "checkmark" : "mic"
-                                )
-                            }
-                            .disabled(device.id == viewModel.selectedMicrophoneID)
-                        }
-                    } else {
-                        Button(SL("No microphone devices available")) {}
-                            .disabled(true)
-                    }
-                }
-                .disabled(viewModel.isBusy || viewModel.isMicrophoneBusy)
-            }
+            footerControls
         }
         .padding(18)
+        .ignoresSafeArea(.container, edges: .top)
         .frame(minWidth: 420, idealWidth: 720, maxWidth: .infinity, minHeight: 300, idealHeight: 420, maxHeight: .infinity)
         .background(SpeecharaFloatingMiniWindowConfigurator())
+        .onAppear {
+            SpeecharaDiagnostics.app.notice(
+                "mini window appeared generation=\(presentationStore.miniWindowGeneration.uuidString, privacy: .public) transcriptChars=\(viewModel.subtitlesText.count, privacy: .public) translationChars=\(viewModel.translatedText.count, privacy: .public) transcriptDraftChars=\(viewModel.liveSubtitlePreview.count, privacy: .public) translationDraftChars=\(viewModel.liveTranslationPreview.count, privacy: .public)"
+            )
+        }
+    }
+
+    private var footerControls: some View {
+        HStack(spacing: 10) {
+            expandButton
+            hideCompletelyButton
+            Spacer()
+        }
+    }
+
+    private var expandButton: some View {
+        Button(SL("Expand Speechara")) {
+            presentationStore.restoreApplication {
+                openWindow(id: "speechara-main")
+            }
+        }
+    }
+
+    private var hideCompletelyButton: some View {
+        Button {
+            presentationStore.enterBackgroundOnlyMode()
+        } label: {
+            Label(SL("Hide completely"), systemImage: "eye.slash")
+        }
+        .help(SL("Keep listening with all Speechara windows hidden."))
+    }
+
+    private var miniMicrophoneControl: some View {
+        HStack(spacing: 0) {
+            Menu {
+                microphoneMenuItems
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(miniMicrophoneForegroundColor)
+                    .frame(width: 30, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .help(SL("Select microphone"))
+
+            Rectangle()
+                .fill(miniMicrophoneDividerColor)
+                .frame(width: 1, height: 18)
+
+            Button {
+                viewModel.toggleMicrophoneCapture()
+            } label: {
+                Image(systemName: viewModel.isMicrophoneListening ? "mic.fill" : "mic.slash.fill")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(miniMicrophoneForegroundColor)
+                    .frame(width: 34, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(
+                viewModel.isMicrophoneListening
+                    ? SL("Turn microphone off. Right-click to choose a microphone.")
+                    : SL("Turn microphone on. Right-click to choose a microphone.")
+            )
+        }
+        .foregroundStyle(miniMicrophoneForegroundColor)
+        .background(
+            Capsule(style: .continuous)
+                .fill(miniMicrophoneBackgroundColor)
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(miniMicrophoneBorderColor, lineWidth: 1)
+        )
+        .disabled(viewModel.isBusy || viewModel.isMicrophoneBusy)
+        .opacity(viewModel.isBusy || viewModel.isMicrophoneBusy ? 0.5 : 1)
+        .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private var microphoneMenuItems: some View {
+        Group {
+            if viewModel.hasAvailableMicrophones {
+                ForEach(viewModel.availableMicrophones) { device in
+                    Button {
+                        viewModel.selectMicrophone(device.id)
+                    } label: {
+                        Label(
+                            device.name,
+                            systemImage: device.id == viewModel.selectedMicrophoneID ? "checkmark" : "mic"
+                        )
+                    }
+                    .disabled(device.id == viewModel.selectedMicrophoneID)
+                }
+            } else {
+                Button(SL("No microphone devices available")) {}
+                    .disabled(true)
+            }
+        }
+    }
+
+    private var miniStopButton: some View {
+        Button {
+            viewModel.stopActiveSession()
+        } label: {
+            Image(systemName: "stop.fill")
+                .font(.system(size: 12, weight: .bold))
+                .frame(width: 36, height: 32)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.secondary.opacity(0.10))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+        )
+        .help(SL("Stop Listening"))
+        .accessibilityLabel(SL("Stop Listening"))
+        .disabled(!viewModel.hasActiveSession || viewModel.isBusy || viewModel.isMicrophoneBusy)
+        .opacity(!viewModel.hasActiveSession || viewModel.isBusy || viewModel.isMicrophoneBusy ? 0.5 : 1)
+    }
+
+    private var miniMicrophoneActiveColor: Color {
+        Color(red: 0.84, green: 0.16, blue: 0.17)
+    }
+
+    private var miniMicrophoneForegroundColor: Color {
+        viewModel.isMicrophoneListening ? miniMicrophoneActiveColor : .secondary
+    }
+
+    private var miniMicrophoneBackgroundColor: Color {
+        viewModel.isMicrophoneListening
+            ? miniMicrophoneActiveColor.opacity(0.055)
+            : Color.secondary.opacity(0.10)
+    }
+
+    private var miniMicrophoneBorderColor: Color {
+        viewModel.isMicrophoneListening
+            ? miniMicrophoneActiveColor.opacity(0.88)
+            : Color.secondary.opacity(0.18)
+    }
+
+    private var miniMicrophoneDividerColor: Color {
+        viewModel.isMicrophoneListening
+            ? miniMicrophoneActiveColor.opacity(0.28)
+            : Color.secondary.opacity(0.22)
     }
 
     private var transcriptPanel: some View {
@@ -446,7 +707,7 @@ private struct SpeecharaListeningMiniView: View {
 
     private var resizableTranscriptLayout: some View {
         GeometryReader { proxy in
-            let gap: CGFloat = 6
+            let gap: CGFloat = 0
             let dividerSize: CGFloat = 8
             let available = layout == .columns ? proxy.size.width : proxy.size.height
             let firstSize = max(90, min(available - dividerSize - 90, available * splitFraction))
@@ -517,6 +778,7 @@ private struct SpeecharaMiniTranscriptPanel: View {
     let text: String
     let draftText: String
     let systemImage: String
+    @State private var scrollWorkItem: DispatchWorkItem?
     private let bottomAnchor = "mini-transcript-bottom-anchor"
 
     var body: some View {
@@ -531,32 +793,41 @@ private struct SpeecharaMiniTranscriptPanel: View {
                     .lineLimit(1)
             }
 
-            VStack(spacing: 0) {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        Text(text)
-                            .font(.system(size: 13, weight: .medium, design: .rounded))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .topLeading)
-                            .textSelection(.enabled)
-                            .padding(12)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if !text.isEmpty {
+                            Text(text)
+                                .font(.system(size: 13, weight: .medium, design: .rounded))
+                                .foregroundStyle(.primary)
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                                .textSelection(.enabled)
+                        }
+
+                        if !cleanDraft.isEmpty {
+                            Text(cleanDraft)
+                                .font(.system(size: 13, weight: .medium, design: .rounded))
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                                .textSelection(.enabled)
+                                .accessibilityLabel(SL("Live draft"))
+                        }
 
                         Color.clear
                             .frame(height: 1)
                             .id(bottomAnchor)
                     }
-                    .onAppear {
-                        scrollToBottom(using: proxy)
-                    }
-                    .onChange(of: text) { _ in
-                        scrollToBottom(using: proxy)
-                    }
+                    .padding(12)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                SpeecharaMiniDraftStrip(text: draftText)
+                .onAppear {
+                    scrollToBottom(using: proxy)
+                }
+                .onChange(of: scrollSignature) { _ in
+                    scrollToBottom(using: proxy)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(Color(nsColor: .textBackgroundColor).opacity(0.72))
@@ -569,34 +840,21 @@ private struct SpeecharaMiniTranscriptPanel: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
+    private var cleanDraft: String {
+        draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var scrollSignature: String {
+        "\(text)-\(cleanDraft)"
+    }
+
     private func scrollToBottom(using proxy: ScrollViewProxy) {
-        DispatchQueue.main.async {
+        scrollWorkItem?.cancel()
+        let workItem = DispatchWorkItem {
             proxy.scrollTo(bottomAnchor, anchor: .bottom)
         }
-    }
-}
-
-private struct SpeecharaMiniDraftStrip: View {
-    let text: String
-
-    private var cleanText: String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    var body: some View {
-        if !cleanText.isEmpty {
-            Text(cleanText)
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .truncationMode(.head)
-                .frame(maxWidth: .infinity, minHeight: 36, maxHeight: 36, alignment: .leading)
-                .padding(.horizontal, 10)
-                .background(.ultraThinMaterial)
-                .overlay(alignment: .top) {
-                    Divider().opacity(0.55)
-                }
-        }
+        scrollWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: workItem)
     }
 }
 
@@ -621,11 +879,14 @@ private struct SpeecharaFloatingMiniWindowConfigurator: NSViewRepresentable {
             window.collectionBehavior.insert(.canJoinAllSpaces)
             window.collectionBehavior.insert(.fullScreenAuxiliary)
             window.hidesOnDeactivate = false
-            window.isMovableByWindowBackground = true
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
+            window.titlebarSeparatorStyle = .none
             window.styleMask.insert(.resizable)
-            window.isMovableByWindowBackground = false
+            window.standardWindowButton(.closeButton)?.isHidden = true
+            window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            window.standardWindowButton(.zoomButton)?.isHidden = true
+            window.isMovableByWindowBackground = true
             window.minSize = NSSize(width: 420, height: 300)
             window.maxSize = NSSize(width: 960, height: 680)
             window.identifier = NSUserInterfaceItemIdentifier("speechara-listening-mini")
@@ -702,10 +963,37 @@ enum SpeecharaMiniWindowCoordinator {
         NSApp.windows.contains { isMiniWindow($0) && $0.isVisible }
     }
 
-    static func closeMiniWindow() {
+    static func closeMiniWindow(restoringMainWindow: Bool = true) {
         NSApp.windows
             .filter(isMiniWindow)
             .forEach { $0.close() }
+
+        if restoringMainWindow {
+            restoreMainWindowIfNeeded()
+        }
+    }
+
+    static func hideAllWindowsForBackgroundMode() {
+        closeMiniWindow(restoringMainWindow: false)
+
+        if mainWindowHiddenForMiniWindow == nil,
+           let mainWindow = NSApp.windows.first(where: { $0.title == mainWindowTitle }) {
+            mainWindowHiddenForMiniWindow = mainWindow
+        }
+
+        hiddenMainWindowBounds = nil
+        coveringApplicationPID = nil
+
+        NSApp.windows
+            .filter { window in
+                !isMiniWindow(window)
+                    && window.isVisible
+            }
+            .forEach { $0.orderOut(nil) }
+    }
+
+    static func restoreWindowsForUserRequest() {
+        closeMiniWindow(restoringMainWindow: false)
         restoreMainWindowIfNeeded()
     }
 
@@ -852,6 +1140,7 @@ private struct SpeecharaMenuBarMenu: View {
     @Environment(\.openWindow) private var openWindow
     @EnvironmentObject private var authStore: AuthSessionStore
     @EnvironmentObject private var viewModel: SubtitleViewModel
+    @EnvironmentObject private var presentationStore: SpeecharaPresentationStore
     @AppStorage("speechara.permissions.onboarding.version") private var permissionsOnboardingVersion = 0
 
     private var canControlListening: Bool {
@@ -894,7 +1183,7 @@ private struct SpeecharaMenuBarMenu: View {
         }
         .disabled(!canControlListening || isControlBusy)
 
-        Button(SL("Open Speechara")) {
+        Button(SL("Show Speechara")) {
             openSpeecharaWindow()
         }
 
@@ -974,18 +1263,21 @@ private struct SpeecharaMenuBarMenu: View {
     }
 
     private func openSpeecharaWindow() {
-        openWindow(id: "speechara-main")
-        NSApp.activate(ignoringOtherApps: true)
+        presentationStore.restoreApplication {
+            openWindow(id: "speechara-main")
+        }
     }
 
     private func openSettingsWindow() {
-        openWindow(id: "speechara-settings")
-        NSApp.activate(ignoringOtherApps: true)
+        presentationStore.restoreApplication {
+            openWindow(id: "speechara-settings")
+        }
     }
 
     private func openListeningWindow() {
-        openWindow(id: "speechara-main")
-        NSApp.activate(ignoringOtherApps: true)
+        presentationStore.restoreApplication {
+            openWindow(id: "speechara-main")
+        }
     }
 }
 
@@ -1186,6 +1478,7 @@ private final class MeetingDetectionStore: ObservableObject {
 
     private weak var viewModel: SubtitleViewModel?
     private var startListeningHandler: (() -> Void)?
+    private var shouldSuppressPrompts: () -> Bool = { false }
     private let monitoringQueue = DispatchQueue(label: "Speechara.MeetingDetection", qos: .utility)
     private var timer: DispatchSourceTimer?
     private var monitoringActivity: NSObjectProtocol?
@@ -1217,10 +1510,12 @@ private final class MeetingDetectionStore: ObservableObject {
 
     func configure(
         viewModel: SubtitleViewModel,
-        startListening: @escaping () -> Void
+        startListening: @escaping () -> Void,
+        shouldSuppressPrompts: @escaping () -> Bool = { false }
     ) {
         self.viewModel = viewModel
         startListeningHandler = startListening
+        self.shouldSuppressPrompts = shouldSuppressPrompts
         startMonitoringIfNeeded()
     }
 
@@ -1269,6 +1564,11 @@ private final class MeetingDetectionStore: ObservableObject {
     }
 
     private func pollForMeetings() {
+        guard !shouldSuppressPrompts() else {
+            closePanel()
+            return
+        }
+
         guard let viewModel else {
             closePanel()
             resetActiveMeetingTracking()

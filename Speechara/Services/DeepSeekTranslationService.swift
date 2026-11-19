@@ -30,6 +30,16 @@ enum DeepSeekTranslationError: LocalizedError {
     }
 }
 
+enum SpeecharaTranslationOutputValidator {
+    static func isCompatible(_ text: String, targetLanguageCode: String) -> Bool {
+        // Script heuristics only worked for the original five languages and
+        // rejected valid Chinese, Japanese, Ukrainian, and other translations.
+        // The shared backend binds each revision to the configured target code.
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !targetLanguageCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
 enum DeepSeekTranslationEvent {
     case preview(UUID, String)
     case completed(UUID, String)
@@ -236,7 +246,12 @@ actor DeepSeekTranslationService {
             .flatMap { turn -> [SpeecharaChatMessage] in
                 let source = turn.source.trimmingCharacters(in: .whitespacesAndNewlines)
                 let translation = turn.translation.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !source.isEmpty, !translation.isEmpty else {
+                guard !source.isEmpty,
+                      !translation.isEmpty,
+                      SpeecharaTranslationOutputValidator.isCompatible(
+                          translation,
+                          targetLanguageCode: targetLanguageCode
+                      ) else {
                     return []
                 }
 
@@ -268,6 +283,16 @@ actor DeepSeekTranslationService {
 
         guard let translation = completion.choices.first?.message.content?.trimmingCharacters(in: .whitespacesAndNewlines),
               !translation.isEmpty else {
+            throw DeepSeekTranslationError.invalidResponse
+        }
+
+        guard SpeecharaTranslationOutputValidator.isCompatible(
+            translation,
+            targetLanguageCode: targetLanguageCode
+        ) else {
+            SpeecharaDiagnostics.translation.error(
+                "rejected stable translation with unexpected script target=\(self.targetLanguageCode, privacy: .public) output=\(SpeecharaDiagnostics.textSummary(translation, limit: 120), privacy: .public)"
+            )
             throw DeepSeekTranslationError.invalidResponse
         }
 
@@ -808,6 +833,17 @@ actor DeepSeekTranslationService {
                 return
             }
 
+            guard SpeecharaTranslationOutputValidator.isCompatible(
+                trimmedText,
+                targetLanguageCode: targetLanguageCode
+            ) else {
+                SpeecharaDiagnostics.translation.error(
+                    "rejected translation revision with unexpected script turn=\(revision.turnId, privacy: .public) target=\(self.targetLanguageCode, privacy: .public) output=\(SpeecharaDiagnostics.textSummary(trimmedText, limit: 120), privacy: .public)"
+                )
+                failPendingTurn(revision.turnId, with: DeepSeekTranslationError.invalidResponse)
+                return
+            }
+
             let previousRevision = latestTranslationRevisionByTurn[revision.turnId] ?? 0
             guard revision.revision > previousRevision,
                   !finalizedTranslationTurnIDs.contains(revision.turnId) else {
@@ -904,10 +940,13 @@ actor DeepSeekTranslationService {
         SpeecharaChatMessage(
             role: "system",
             content: """
-            Translate new live meeting fragments from \(sourceLanguageName) to \(targetLanguageName).
+            You are a strict translation engine.
+            Translate new live meeting fragments from \(sourceLanguageName) to \(targetLanguageName) (language code: \(targetLanguageCode)).
             Use prior translated turns only as short context. Preserve line breaks and any leading timestamps like [12:34].
             If a line starts with a speaker label before a colon, preserve the label and translate only the spoken content.
-            Return only the translated fragment in \(targetLanguageName), with no commentary.
+            Every natural-language sentence must be in \(targetLanguageName).
+            Never switch to a language other than \(targetLanguageName), even if prior context uses another language.
+            Return only the translated fragment, with no commentary.
             """
         )
     }
@@ -1108,7 +1147,8 @@ actor SpeecharaLiveTranslationV2Service {
     private var targetLanguageName = ""
     private var eventHandler: (@Sendable (DeepSeekTranslationEvent) -> Void)?
 
-    private var logicalSessionID = UUID().uuidString
+    private var logicalSessionID = UUID()
+    private var wireSessionID: String { logicalSessionID.uuidString.lowercased() }
     private var connectionID: String?
     private var webSocketTask: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
@@ -1180,7 +1220,7 @@ actor SpeecharaLiveTranslationV2Service {
         self.targetLanguageCode = targetCode
         self.targetLanguageName = targetLanguageName
         self.eventHandler = eventHandler
-        logicalSessionID = UUID().uuidString
+        logicalSessionID = UUID()
         connectionID = nil
         clientRevisionByTurn.removeAll()
         latestPreviewByTurn.removeAll()
@@ -1199,7 +1239,7 @@ actor SpeecharaLiveTranslationV2Service {
         isUsingLegacyFallback = false
 
         Self.logger.notice(
-            "starting v2 session id=\(self.logicalSessionID, privacy: .public) source=\(sourceCode, privacy: .public) target=\(targetCode, privacy: .public)"
+            "starting v2 session id=\(self.wireSessionID, privacy: .public) source=\(sourceCode, privacy: .public) target=\(targetCode, privacy: .public)"
         )
         // Translation readiness must never delay audio capture. From this point on,
         // previews and finals are accepted into the local latest-wins/durable queues;
@@ -1220,7 +1260,7 @@ actor SpeecharaLiveTranslationV2Service {
             return
         }
 
-        let turnKey = turnID.uuidString
+        let turnKey = turnID.uuidString.lowercased()
         guard !finalizedTurnIDs.contains(turnKey) else {
             return
         }
@@ -1254,7 +1294,7 @@ actor SpeecharaLiveTranslationV2Service {
             return
         }
 
-        let turnKey = turnID.uuidString
+        let turnKey = turnID.uuidString.lowercased()
         guard !finalizedTurnIDs.contains(turnKey) else {
             return
         }
@@ -1310,7 +1350,7 @@ actor SpeecharaLiveTranslationV2Service {
         reconnectTask = nil
 
         if isReady {
-            try? await sendMessage(V2CompleteSessionMessage(type: "complete_session", sessionId: logicalSessionID))
+            try? await sendMessage(V2CompleteSessionMessage(type: "complete_session", sessionId: wireSessionID))
         }
 
         failHandshakeContinuations(with: CancellationError())
@@ -1350,7 +1390,12 @@ actor SpeecharaLiveTranslationV2Service {
         let historyMessages = history.suffix(4).flatMap { turn -> [SpeecharaChatMessage] in
             let source = turn.source.trimmingCharacters(in: .whitespacesAndNewlines)
             let translation = turn.translation.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !source.isEmpty, !translation.isEmpty else {
+            guard !source.isEmpty,
+                  !translation.isEmpty,
+                  SpeecharaTranslationOutputValidator.isCompatible(
+                      translation,
+                      targetLanguageCode: targetLanguageCode
+                  ) else {
                 return []
             }
             return [
@@ -1365,7 +1410,13 @@ actor SpeecharaLiveTranslationV2Service {
                 messages: [
                     SpeecharaChatMessage(
                         role: "system",
-                        content: "Translate from \(sourceLanguageName) to \(targetLanguageName). Preserve timestamps, speaker labels, and line order. Return only the translation."
+                        content: """
+                        You are a strict translation engine.
+                        Translate from \(sourceLanguageName) to \(targetLanguageName) (language code: \(targetLanguageCode)).
+                        Every natural-language sentence in the response must be in \(targetLanguageName).
+                        Never switch to a language other than \(targetLanguageName), even if prior context uses another language.
+                        Preserve timestamps, speaker labels, and line order. Return only the translation.
+                        """
                     ),
                 ] + historyMessages + [
                     SpeecharaChatMessage(role: "user", content: sourceText),
@@ -1378,6 +1429,16 @@ actor SpeecharaLiveTranslationV2Service {
 
         guard let translation = completion.choices.first?.message.content?.trimmingCharacters(in: .whitespacesAndNewlines),
               !translation.isEmpty else {
+            throw DeepSeekTranslationError.invalidResponse
+        }
+        guard SpeecharaTranslationOutputValidator.isCompatible(
+            translation,
+            targetLanguageCode: targetLanguageCode
+        ) else {
+            let summary = String(translation.replacingOccurrences(of: "\n", with: " ").prefix(120))
+            Self.logger.error(
+                "rejected stable translation with unexpected script target=\(self.targetLanguageCode, privacy: .public) output=\(summary, privacy: .public)"
+            )
             throw DeepSeekTranslationError.invalidResponse
         }
         return translation
@@ -1447,7 +1508,7 @@ actor SpeecharaLiveTranslationV2Service {
             V2ConfigureMessage(
                 type: "configure",
                 protocolVersion: 2,
-                sessionId: logicalSessionID,
+                sessionId: wireSessionID,
                 sourceLanguage: sourceLanguageCode,
                 targetLanguage: targetLanguageCode
             )
@@ -1462,7 +1523,7 @@ actor SpeecharaLiveTranslationV2Service {
             V2ResumeMessage(
                 type: "resume",
                 protocolVersion: 2,
-                sessionId: logicalSessionID,
+                sessionId: wireSessionID,
                 sourceLanguage: sourceLanguageCode,
                 targetLanguage: targetLanguageCode,
                 pendingFinals: finals
@@ -1474,7 +1535,7 @@ actor SpeecharaLiveTranslationV2Service {
         try await sendMessage(
             V2PreviewMessage(
                 type: "translate_preview",
-                sessionId: logicalSessionID,
+                sessionId: wireSessionID,
                 turnId: turnID,
                 clientRevision: revision,
                 sourceText: sourceText
@@ -1503,7 +1564,7 @@ actor SpeecharaLiveTranslationV2Service {
         try await sendMessage(
             V2FinalMessage(
                 type: "translate_final",
-                sessionId: logicalSessionID,
+                sessionId: wireSessionID,
                 turnId: final.turnID,
                 clientRevision: final.clientRevision,
                 sourceText: final.sourceText
@@ -1576,7 +1637,7 @@ actor SpeecharaLiveTranslationV2Service {
             Self.logger.notice("v2 hello connection=\(hello.connectionId, privacy: .public)")
         case "ready":
             let ready = try JSONDecoder().decode(V2ReadyMessage.self, from: data)
-            guard ready.sessionId == logicalSessionID else {
+            guard UUID(uuidString: ready.sessionId) == logicalSessionID else {
                 return
             }
             connectionID = ready.connectionId
@@ -1596,58 +1657,65 @@ actor SpeecharaLiveTranslationV2Service {
             )
         case "final_ack":
             let ack = try JSONDecoder().decode(V2AckMessage.self, from: data)
-            if var pending = pendingFinals[ack.turnId], pending.clientRevision == ack.clientRevision {
+            let turnKey = ack.turnId.lowercased()
+            if var pending = pendingFinals[turnKey], pending.clientRevision == ack.clientRevision {
                 pending.acknowledged = true
-                pendingFinals[ack.turnId] = pending
+                pendingFinals[turnKey] = pending
             }
             Self.logger.notice(
                 "final ack turn=\(ack.turnId, privacy: .public) revision=\(ack.clientRevision, privacy: .public) status=\(ack.status, privacy: .public)"
             )
         case "translation_preview":
             let result = try JSONDecoder().decode(V2TranslationResult.self, from: data)
-            guard result.sessionId == logicalSessionID,
+            guard UUID(uuidString: result.sessionId) == logicalSessionID,
                   result.connectionId == connectionID,
-                  !finalizedTurnIDs.contains(result.turnId),
-                  pendingFinals[result.turnId] == nil,
-                  result.clientRevision == previewInFlightRevisionByTurn[result.turnId],
                   let turnID = UUID(uuidString: result.turnId) else {
                 return
             }
-            previewInFlightRevisionByTurn.removeValue(forKey: result.turnId)
+            let turnKey = turnID.uuidString.lowercased()
+            guard !finalizedTurnIDs.contains(turnKey),
+                  pendingFinals[turnKey] == nil,
+                  result.clientRevision == previewInFlightRevisionByTurn[turnKey] else {
+                return
+            }
+            previewInFlightRevisionByTurn.removeValue(forKey: turnKey)
             eventHandler?(.preview(turnID, result.text))
-            logTiming(result.timing, lane: "preview", turnID: result.turnId, revision: result.clientRevision)
+            logTiming(result.timing, lane: "preview", turnID: turnKey, revision: result.clientRevision)
             do {
-                try await sendLatestPreviewIfNeeded(turnID: result.turnId)
+                try await sendLatestPreviewIfNeeded(turnID: turnKey)
             } catch {
                 socketDidFail(error)
             }
         case "translation_final":
             let result = try JSONDecoder().decode(V2TranslationResult.self, from: data)
-            guard result.sessionId == logicalSessionID,
+            guard UUID(uuidString: result.sessionId) == logicalSessionID,
                   result.connectionId == connectionID,
-                  let pending = pendingFinals[result.turnId],
-                  pending.clientRevision == result.clientRevision,
                   let turnID = UUID(uuidString: result.turnId) else {
                 return
             }
-            finalizedTurnIDs.insert(result.turnId)
-            cancelEmergencyPreview(for: result.turnId)
-            if emergencyFinalTurnID == result.turnId {
+            let turnKey = turnID.uuidString.lowercased()
+            guard let pending = pendingFinals[turnKey],
+                  pending.clientRevision == result.clientRevision else {
+                return
+            }
+            finalizedTurnIDs.insert(turnKey)
+            cancelEmergencyPreview(for: turnKey)
+            if emergencyFinalTurnID == turnKey {
                 cancelEmergencyFinalTask()
             }
-            emergencyCompletedFinalTurnIDs.insert(result.turnId)
-            latestPreviewByTurn.removeValue(forKey: result.turnId)
-            pendingFinals.removeValue(forKey: result.turnId)
+            emergencyCompletedFinalTurnIDs.insert(turnKey)
+            latestPreviewByTurn.removeValue(forKey: turnKey)
+            pendingFinals.removeValue(forKey: turnKey)
             eventHandler?(.completed(turnID, result.text))
-            logTiming(result.timing, lane: "final", turnID: result.turnId, revision: result.clientRevision)
+            logTiming(result.timing, lane: "final", turnID: turnKey, revision: result.clientRevision)
         case "final_missing":
             let missing = try JSONDecoder().decode(V2TurnMessage.self, from: data)
-            if let pending = pendingFinals[missing.turnId], pending.clientRevision == missing.clientRevision {
+            if let pending = pendingFinals[missing.turnId.lowercased()], pending.clientRevision == missing.clientRevision {
                 try await sendFinal(pending)
             }
         case "final_failed":
             let failed = try JSONDecoder().decode(V2TurnMessage.self, from: data)
-            pendingFinals.removeValue(forKey: failed.turnId)
+            pendingFinals.removeValue(forKey: failed.turnId.lowercased())
             eventHandler?(.failed("Final translation failed for turn \(failed.turnId)."))
         case "error":
             let error = try JSONDecoder().decode(V2ErrorMessage.self, from: data)
@@ -1677,7 +1745,7 @@ actor SpeecharaLiveTranslationV2Service {
 
         switch error.scope {
         case "preview":
-            if let turnID = error.turnId,
+            if let turnID = error.turnId?.lowercased(),
                error.clientRevision == previewInFlightRevisionByTurn[turnID] {
                 previewInFlightRevisionByTurn.removeValue(forKey: turnID)
                 lastSentPreviewTextByTurn.removeValue(forKey: turnID)
@@ -1688,7 +1756,7 @@ actor SpeecharaLiveTranslationV2Service {
             }
             return
         case "final":
-            if !error.recoverable, let turnID = error.turnId {
+            if !error.recoverable, let turnID = error.turnId?.lowercased() {
                 pendingFinals.removeValue(forKey: turnID)
                 eventHandler?(.failed(error.message))
             }

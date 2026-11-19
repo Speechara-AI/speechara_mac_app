@@ -57,6 +57,7 @@ Options:
   --skip-notarization     Pass through to create_dmg.sh for local-only, no-deploy testing.
   --sign-identity ID      Pass through to create_dmg.sh.
   --no-layout             Pass through to create_dmg.sh for local-only, no-deploy testing.
+  --layout-metadata PATH  Reuse the verified branded Finder layout from an earlier installer.
   -h, --help              Show this help message.
 
 Environment:
@@ -247,6 +248,11 @@ while [ $# -gt 0 ]; do
       NO_LAYOUT_REQUESTED=1
       CREATE_DMG_ARGS+=("$1")
       shift
+      ;;
+    --layout-metadata)
+      [ $# -ge 2 ] || fail "Missing value for --layout-metadata"
+      CREATE_DMG_ARGS+=("$1" "$2")
+      shift 2
       ;;
     --sign-identity)
       [ $# -ge 2 ] || fail "Missing value for --sign-identity"

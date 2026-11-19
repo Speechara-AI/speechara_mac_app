@@ -12,17 +12,17 @@ private enum EmailAuthFlow: Equatable {
     var title: String {
         switch self {
         case .signIn:
-            return "Email sign in"
+            return SL("Email sign in")
         case .register:
-            return "Create account"
+            return SL("Create account")
         case .verifyRegistration:
-            return "Verify your email"
+            return SL("Verify your email")
         case .completeRegistration:
-            return "Set your password"
+            return SL("Set your password")
         case .registrationTotp:
-            return "Set up authenticator"
+            return SL("Set up authenticator")
         case .loginMfa:
-            return "Authenticator code"
+            return SL("Authenticator code")
         }
     }
 }
@@ -110,7 +110,9 @@ struct AuthenticationView: View {
     private var socialButtons: some View {
         VStack(spacing: 12) {
             providerButton(
-                title: authStore.activeAuthenticationProvider == .google ? "Waiting for Google..." : "Continue with Google",
+                title: authStore.activeAuthenticationProvider == .google
+                    ? SL("Waiting for Google...")
+                    : SL("Continue with Google"),
                 mark: AnyView(GoogleMark())
             ) {
                 clearMessages()
@@ -118,7 +120,9 @@ struct AuthenticationView: View {
             }
 
             providerButton(
-                title: authStore.activeAuthenticationProvider == .microsoft ? "Waiting for Microsoft..." : "Continue with Microsoft",
+                title: authStore.activeAuthenticationProvider == .microsoft
+                    ? SL("Waiting for Microsoft...")
+                    : SL("Continue with Microsoft"),
                 mark: AnyView(MicrosoftMark())
             ) {
                 clearMessages()
@@ -126,7 +130,9 @@ struct AuthenticationView: View {
             }
 
             providerButton(
-                title: authStore.activeAuthenticationProvider == .apple ? "Waiting for Apple..." : "Continue with Apple",
+                title: authStore.activeAuthenticationProvider == .apple
+                    ? SL("Waiting for Apple...")
+                    : SL("Continue with Apple"),
                 mark: AnyView(AppleMark())
             ) {
                 clearMessages()
@@ -141,7 +147,7 @@ struct AuthenticationView: View {
                 .fill(cardBorderColor)
                 .frame(height: 1)
 
-            Text("or")
+            Text(SL("or"))
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
 
@@ -161,7 +167,7 @@ struct AuthenticationView: View {
                 Spacer()
 
                 if showsEmailModeSwitch {
-                    Button(emailFlow == .signIn ? "Create account" : "Have an account?") {
+                    Button(emailFlow == .signIn ? SL("Create account") : SL("Have an account?")) {
                         switchEmailMode()
                     }
                     .buttonStyle(.link)
@@ -236,7 +242,7 @@ struct AuthenticationView: View {
         VStack(alignment: .leading, spacing: 12) {
             AuthMessageStrip(
                 tint: Color(red: 0.15, green: 0.56, blue: 0.38),
-                text: "We sent a code to \(challenge.maskedEmail)."
+                text: SLF("We sent a code to %@.", challenge.maskedEmail)
             )
 
             AuthField(title: "Verification code") {
@@ -273,14 +279,14 @@ struct AuthenticationView: View {
                 AuthPasswordInput("Repeat password", text: $confirmPassword)
             }
 
-            Toggle("Set up 2FA before finishing", isOn: $wantsTotpDuringRegistration)
+            Toggle(SL("Set up 2FA before finishing"), isOn: $wantsTotpDuringRegistration)
                 .toggleStyle(.checkbox)
 
             Button {
                 continueRegistration(verification)
             } label: {
                 AuthButtonLabel(
-                    title: wantsTotpDuringRegistration ? "Continue to 2FA" : "Create account",
+                    title: wantsTotpDuringRegistration ? SL("Continue to 2FA") : SL("Create account"),
                     systemImage: wantsTotpDuringRegistration ? "lock.shield" : "person.badge.plus"
                 )
             }
@@ -295,7 +301,7 @@ struct AuthenticationView: View {
                 TotpQRCodeView(dataURL: setup.qrCodeDataUrl)
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Scan the QR code in your authenticator app, or enter this secret manually.")
+                    Text(SL("Scan the QR code in your authenticator app, or enter this secret manually."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -333,7 +339,7 @@ struct AuthenticationView: View {
         VStack(alignment: .leading, spacing: 12) {
             AuthMessageStrip(
                 tint: Color(red: 0.17, green: 0.43, blue: 0.88),
-                text: "Enter the authenticator code for \(challenge.maskedEmail)."
+                text: SLF("Enter the authenticator code for %@.", challenge.maskedEmail)
             )
 
             AuthField(title: "Authenticator code") {
@@ -574,7 +580,7 @@ struct AuthenticationView: View {
 
     private func validateEmail(_ value: String) -> Bool {
         guard value.contains("@"), value.contains(".") else {
-            localErrorMessage = "Enter a valid email address."
+            localErrorMessage = SL("Enter a valid email address.")
             return false
         }
 
@@ -583,7 +589,7 @@ struct AuthenticationView: View {
 
     private func validateRequired(_ value: String, label: String) -> Bool {
         guard !value.trimmed.isEmpty else {
-            localErrorMessage = "\(label) is required."
+            localErrorMessage = SLF("%@ is required.", SL(label))
             return false
         }
 
@@ -596,7 +602,7 @@ struct AuthenticationView: View {
         }
 
         guard password == confirmPassword else {
-            localErrorMessage = "Passwords do not match."
+            localErrorMessage = SL("Passwords do not match.")
             return false
         }
 
@@ -610,19 +616,19 @@ struct AuthenticationView: View {
 
     private var passwordPolicyError: String? {
         if password.count < 8 {
-            return "Password must be at least 8 characters."
+            return SL("Password must be at least 8 characters.")
         }
         if password.rangeOfCharacter(from: .uppercaseLetters) == nil {
-            return "Password must include an uppercase letter."
+            return SL("Password must include an uppercase letter.")
         }
         if password.rangeOfCharacter(from: .lowercaseLetters) == nil {
-            return "Password must include a lowercase letter."
+            return SL("Password must include a lowercase letter.")
         }
         if password.rangeOfCharacter(from: .decimalDigits) == nil {
-            return "Password must include a digit."
+            return SL("Password must include a digit.")
         }
         if password.rangeOfCharacter(from: CharacterSet.alphanumerics.inverted) == nil {
-            return "Password must include a symbol."
+            return SL("Password must include a symbol.")
         }
 
         return nil
@@ -640,11 +646,14 @@ struct AuthenticationView: View {
     private func authenticatingMessage(for provider: AuthenticationProvider) -> String {
         switch provider {
         case .google, .microsoft:
-            return "Speechara opened your default browser. Finish \(provider.displayName) sign-in there and the app will activate again automatically."
+            return SLF(
+                "Speechara opened your default browser. Finish %@ sign-in there and the app will activate again automatically.",
+                provider.displayName
+            )
         case .apple:
-            return "Complete Apple sign-in in the system prompt."
+            return SL("Complete Apple sign-in in the system prompt.")
         case .email:
-            return "Checking your Speechara account..."
+            return SL("Checking your Speechara account...")
         }
     }
 
@@ -732,7 +741,7 @@ private struct AuthField<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title)
+            Text(SL(title))
                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                 .foregroundStyle(.secondary)
 
@@ -773,9 +782,9 @@ private struct AuthPasswordInput: View {
         HStack(spacing: 8) {
             Group {
                 if isPasswordVisible {
-                    TextField(placeholder, text: $text)
+                    TextField(SL(placeholder), text: $text)
                 } else {
-                    SecureField(placeholder, text: $text)
+                    SecureField(SL(placeholder), text: $text)
                 }
             }
             .textFieldStyle(.plain)
@@ -819,7 +828,7 @@ private struct AuthButtonLabel: View {
             Image(systemName: systemImage)
                 .font(.system(size: 14, weight: .semibold))
 
-            Text(title)
+            Text(SL(title))
                 .font(.system(size: 15, weight: .semibold))
         }
         .foregroundStyle(.white)

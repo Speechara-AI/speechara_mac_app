@@ -1,5 +1,97 @@
 # Speechara macOS Version History
 
+## 2.0.7 - 2026-11-19
+
+### Security
+- Protect Google desktop sign-in with a client-bound authorization handoff.
+- Require the existing authenticator factor after social sign-in and password enrollment.
+- Preserve the history persistence fixes and features from version 2.0.6.
+
+## 2.0.6 - 2026-11-18
+
+### Fixed
+- Fixed completed meetings appearing as empty or active entries in history while their transcript remained in the workspace.
+- Save transcript and translation changes locally immediately and sync them to history throughout a meeting, with automatic retries after interruptions.
+- Keep meetings connected to their history entries after app restarts, and recover matching empty entries from older local drafts.
+- Keep the current draft when saving fails instead of clearing it when starting a new meeting.
+- Save the completed status when listening stops, refresh history after saves, and finish pending saves when quitting the app.
+
+## 2.0.5 - 2026-11-10
+
+### Fixed
+- Made speaking note AI errors retry the failed AI action instead of re-saving the note.
+- Clarified title generation errors and preserved separate recovery for save failures and revision conflicts.
+- Prevented automatic title generation from continuing after a failed note save.
+
+## 2.0.4 - 2026-11-05
+
+### Fixed
+- Fixed live translation reconnecting repeatedly when the server returned the same session ID with different capitalization.
+
+## 2.0.3 - 2026-08-29
+
+### Changed
+- Published the current macOS implementation as a signed and notarized Developer ID update.
+
+### Fixed
+- Refreshed Sparkle appcast and website download metadata for the current macOS build.
+
+## 2.0.1 - 2026-08-25
+
+### Changed
+- Published the current macOS implementation as a signed and notarized Developer ID update.
+
+### Fixed
+- Refreshed Sparkle appcast and website download metadata for the current macOS build.
+
+## 1.1.6 - 2026-08-12
+
+### Changed
+- Published the latest macOS implementation as a signed and notarized Developer ID update.
+
+### Fixed
+- Refreshed Sparkle appcast and website download metadata for the current macOS build.
+
+## 1.1.5 - 2026-08-10
+
+### Changed
+- Published the latest macOS implementation as a signed and notarized Developer ID update.
+
+### Fixed
+- Refreshed Sparkle appcast and website download metadata for the current macOS build.
+
+## 1.1.4 - 2026-07-30
+
+### Changed
+- Published the latest macOS implementation as a signed and notarized Developer ID update.
+
+### Fixed
+- Refreshed Sparkle appcast and website download metadata for the current macOS build.
+
+## 1.1.3 - 2026-07-23
+
+### Changed
+- Published the current macOS implementation as a signed and notarized Developer ID update.
+
+### Fixed
+- Refreshed Sparkle appcast and website download metadata for the current macOS build.
+
+## 1.1.2 - 2026-07-22
+
+### Changed
+- Published the current macOS implementation as a signed and notarized Developer ID update.
+
+### Fixed
+- Refreshed Sparkle appcast and website download metadata for the current macOS build.
+
+## 1.1.1 - 2026-07-21
+
+### Changed
+- Published the current macOS implementation as a signed and notarized Developer ID release.
+
+### Fixed
+- Refreshed the Sparkle update package and release metadata for the latest macOS build.
+
 ## 1.1.0 - 2026-07-17
 
 ### Added

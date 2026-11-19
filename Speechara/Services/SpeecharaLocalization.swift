@@ -1,54 +1,109 @@
 import Foundation
 import ObjectiveC.runtime
 
-enum SpeecharaAppLanguage: String, CaseIterable, Identifiable {
-    case english = "en"
-    case russian = "ru"
-    case german = "de"
-    case spanish = "es"
-    case french = "fr"
+struct SpeecharaAppLanguage: RawRepresentable, CaseIterable, Hashable, Identifiable, Sendable {
+    let rawValue: String
+
+    private init(_ rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    init?(rawValue: String) {
+        guard Self.supportedCodes.contains(rawValue) else { return nil }
+        self.rawValue = rawValue
+    }
+
+    static let english = SpeecharaAppLanguage("en")
+    static let russian = SpeecharaAppLanguage("ru")
+    static let spanish = SpeecharaAppLanguage("es")
+    static let french = SpeecharaAppLanguage("fr")
+    static let german = SpeecharaAppLanguage("de")
+
+    private static let languageNames: [(code: String, name: String)] = [
+        ("en", "English"),
+        ("ru", "Русский"),
+        ("es", "Español"),
+        ("fr", "Français"),
+        ("de", "Deutsch"),
+        ("ar", "العربية"),
+        ("be", "Беларуская"),
+        ("bn", "বাংলা"),
+        ("bs", "Bosanski"),
+        ("bg", "Български"),
+        ("ca", "Català"),
+        ("zh", "中文"),
+        ("hr", "Hrvatski"),
+        ("cs", "Čeština"),
+        ("da", "Dansk"),
+        ("nl", "Nederlands"),
+        ("et", "Eesti"),
+        ("fi", "Suomi"),
+        ("el", "Ελληνικά"),
+        ("gu", "ગુજરાતી"),
+        ("he", "עברית"),
+        ("hi", "हिन्दी"),
+        ("hu", "Magyar"),
+        ("id", "Bahasa Indonesia"),
+        ("it", "Italiano"),
+        ("ja", "日本語"),
+        ("kn", "ಕನ್ನಡ"),
+        ("ko", "한국어"),
+        ("lv", "Latviešu"),
+        ("lt", "Lietuvių"),
+        ("mk", "Македонски"),
+        ("ms", "Bahasa Melayu"),
+        ("mr", "मराठी"),
+        ("no", "Norsk"),
+        ("fa", "فارسی"),
+        ("pl", "Polski"),
+        ("pt", "Português"),
+        ("ro", "Română"),
+        ("sr", "Српски"),
+        ("sk", "Slovenčina"),
+        ("sl", "Slovenščina"),
+        ("sv", "Svenska"),
+        ("tl", "Tagalog"),
+        ("ta", "தமிழ்"),
+        ("te", "తెలుగు"),
+        ("th", "ไทย"),
+        ("tr", "Türkçe"),
+        ("uk", "Українська"),
+        ("ur", "اردو"),
+        ("vi", "Tiếng Việt"),
+    ]
+
+    private static let supportedCodes = Set(languageNames.map(\.code))
+
+    static let allCases = languageNames.map { SpeecharaAppLanguage($0.code) }
 
     var id: String { rawValue }
 
     var localeIdentifier: String { rawValue }
 
     var pickerDisplayName: String {
-        switch self {
-        case .english:
-            return "English"
-        case .russian:
-            return "Русский"
-        case .german:
-            return "Deutsch"
-        case .spanish:
-            return "Español"
-        case .french:
-            return "Français"
-        }
+        Self.languageNames.first { $0.code == rawValue }?.name ?? rawValue
+    }
+
+    var isRightToLeft: Bool {
+        rawValue == "ar" || rawValue == "fa" || rawValue == "he" || rawValue == "ur"
     }
 
     static func resolvedDefault(from preferredLanguages: [String] = Locale.preferredLanguages) -> SpeecharaAppLanguage {
         for identifier in preferredLanguages {
-            let lowercased = identifier.lowercased()
-
-            if lowercased.hasPrefix("ru") {
-                return .russian
+            let baseCode = identifier
+                .lowercased()
+                .split(whereSeparator: { $0 == "-" || $0 == "_" })
+                .first
+                .map(String.init) ?? ""
+            let normalizedCode: String
+            switch baseCode {
+            case "fil": normalizedCode = "tl"
+            case "in": normalizedCode = "id"
+            case "iw": normalizedCode = "he"
+            default: normalizedCode = baseCode
             }
-
-            if lowercased.hasPrefix("de") {
-                return .german
-            }
-
-            if lowercased.hasPrefix("es") {
-                return .spanish
-            }
-
-            if lowercased.hasPrefix("fr") {
-                return .french
-            }
-
-            if lowercased.hasPrefix("en") {
-                return .english
+            if let language = SpeecharaAppLanguage(rawValue: normalizedCode) {
+                return language
             }
         }
 
@@ -110,7 +165,9 @@ final class SpeecharaLocalizationStore: ObservableObject {
             return key
         }
 
-        return Self.translations[language]?[trimmedKey] ?? key
+        return Self.translations[language]?[trimmedKey]
+            ?? Self.generatedTranslations[language.rawValue]?[trimmedKey]
+            ?? key
     }
 
     func localizedFormat(_ key: String, _ arguments: [CVarArg]) -> String {
@@ -119,49 +176,24 @@ final class SpeecharaLocalizationStore: ObservableObject {
     }
 
     func localizedLanguageName(for languageOption: SpeecharaAppLanguage) -> String {
-        switch language {
-        case .english:
-            switch languageOption {
-            case .english: return "English"
-            case .russian: return "Russian"
-            case .german: return "German"
-            case .spanish: return "Spanish"
-            case .french: return "French"
-            }
-        case .russian:
-            switch languageOption {
-            case .english: return "Английский"
-            case .russian: return "Русский"
-            case .german: return "Немецкий"
-            case .spanish: return "Испанский"
-            case .french: return "Французский"
-            }
-        case .german:
-            switch languageOption {
-            case .english: return "Englisch"
-            case .russian: return "Russisch"
-            case .german: return "Deutsch"
-            case .spanish: return "Spanisch"
-            case .french: return "Französisch"
-            }
-        case .spanish:
-            switch languageOption {
-            case .english: return "Inglés"
-            case .russian: return "Ruso"
-            case .german: return "Alemán"
-            case .spanish: return "Español"
-            case .french: return "Francés"
-            }
-        case .french:
-            switch languageOption {
-            case .english: return "Anglais"
-            case .russian: return "Russe"
-            case .german: return "Allemand"
-            case .spanish: return "Espagnol"
-            case .french: return "Français"
-            }
-        }
+        languageOption.pickerDisplayName
     }
+
+    private static let generatedTranslations: [String: [String: String]] = {
+        guard let url = Bundle.main.url(
+            forResource: "SpeecharaInterfaceTranslations",
+            withExtension: "json"
+        ),
+        let data = try? Data(contentsOf: url),
+        let translations = try? JSONDecoder().decode(
+            [String: [String: String]].self,
+            from: data
+        ) else {
+            return [:]
+        }
+
+        return translations
+    }()
 
     private static let translations: [SpeecharaAppLanguage: [String: String]] = [
         .russian: [
@@ -221,12 +253,36 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Microphone is off. Your replies will not be included in the transcript.": "Микрофон выключен. Ваши реплики не попадут в транскрипт.",
             "Hide warning": "Скрыть предупреждение",
             "Live transcript": "Транскрипт",
+            "Live translation": "Перевод в реальном времени",
+            "View": "Вид",
+            "View options": "Настройки вида",
+            "Panel layout": "Расположение панелей",
+            "Side by side": "Рядом",
+            "Stacked": "Друг под другом",
             "Suggested response": "Подсказка ответа",
             "Copy": "Копировать",
+            "Copied": "Скопировано",
+            "Show sidebar": "Показать боковую панель",
+            "Hide sidebar": "Скрыть боковую панель",
+            "Expand sidebar": "Развернуть боковую панель",
+            "Collapse sidebar": "Свернуть боковую панель",
             "Copy transcript": "Скопировать транскрипт",
+            "Copy entire transcript": "Скопировать весь транскрипт",
+            "Copy entire translation": "Скопировать весь перевод",
             "Transcribe": "Транскрипт",
             "Translate": "Перевод",
             "Summarize": "Сделать саммари",
+            "Meeting notes": "Заметки встречи",
+            "Preparing meeting notes...": "Готовим заметки встречи...",
+            "Building meeting notes...": "Создаём заметки встречи...",
+            "No meeting notes yet.": "Заметок встречи пока нет.",
+            "AI meeting notes failed, showing a local fallback instead.": "Не удалось создать заметки встречи с помощью AI — показываем локальный вариант.",
+            "Meeting notes ready": "Заметки встречи готовы",
+            "Meeting notes missing": "Заметки встречи отсутствуют",
+            "Meeting notes available": "Заметки встречи доступны",
+            "Search transcript, translation, summary, or meeting notes": "Искать по транскрипту, переводу, саммари или заметкам встречи",
+            "Primary AI action: draft a reply to the latest question.": "Основное AI-действие: подготовить ответ на последний вопрос.",
+            "Secondary AI actions": "Дополнительные AI-действия",
             "Clear subtitles": "Очистить субтитры",
             "Hide panel": "Скрыть панель",
             "Open": "Открыть",
@@ -280,7 +336,7 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Current plan": "Текущий тариф",
             "Renew": "Продлить",
             "Open billing in the web app": "Открыть биллинг в веб-приложении",
-            "Pro beta is free while Speechara is in beta. You will be notified before paid billing begins.": "Pro beta бесплатен, пока Speechara находится в beta. Мы уведомим вас до начала платного биллинга.",
+            "Free includes 180 minutes every month, forever, with no credit card required. Pro beta is free while Speechara is in beta.": "Free включает 180 минут каждый месяц — бесплатно навсегда и без банковской карты. Pro beta бесплатен, пока Speechara находится в beta.",
             "Current period end": "Конец текущего периода",
             "Subscription status": "Статус подписки",
             "Transcription access": "Доступ к транскрибации",
@@ -316,6 +372,8 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Turn On Microphone": "Включить микрофон",
             "Continue Without Mic": "Продолжить без микрофона",
             "Listening": "Слушает",
+            "Audio detected": "Звук обнаружен",
+            "Waiting for audio": "Ожидание звука",
             "Meeting detected": "Обнаружен митинг",
             "Meeting audio is active": "Аудио митинга активно",
             "Meeting ended?": "Митинг завершён?",
@@ -332,6 +390,10 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Microphone live": "Микрофон активен",
             "Listening stopped": "Прослушивание остановлено",
             "Waiting for speech...": "Ожидание речи...",
+            "Listening… Transcript will appear here.": "Слушаем… Транскрипт появится здесь.",
+            "Start listening to see the transcript here.": "Начните прослушивание — транскрипт появится здесь.",
+            "Translation will appear as you speak.": "Перевод будет появляться по мере речи.",
+            "Live transcript with timestamped speech blocks.": "Транскрипт в реальном времени с временными метками.",
             "Generate a summary for the text in this panel.": "Сгенерировать саммари для текста в этой панели.",
             "Create a full structured meeting protocol from this transcript.": "Создать полный структурированный протокол встречи по этому транскрипту.",
             "Draft a suggested reply to the latest question in this transcript.": "Подготовить подсказку ответа на последний вопрос из этого транскрипта.",
@@ -355,7 +417,10 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Select microphone": "Выбрать микрофон",
             "Refresh microphones": "Обновить микрофоны",
             "Open Speechara": "Открыть Speechara",
+            "Show Speechara": "Показать Speechara",
             "Quit Speechara completely": "Полностью закрыть Speechara",
+            "Hide completely": "Скрыть полностью",
+            "Keep listening with all Speechara windows hidden.": "Продолжать слушать, скрыв все окна Speechara.",
             "Grant access to continue": "Разрешите доступ, чтобы продолжить",
             "Update": "Обновить",
             "Update %@": "Обновить до %@",
@@ -449,16 +514,42 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Microphone is off. Your replies will not be included in the transcript.": "Das Mikrofon ist ausgeschaltet. Ihre Antworten werden nicht ins Transkript aufgenommen.",
             "Hide warning": "Warnung ausblenden",
             "Live transcript": "Live-Transkript",
+            "Live translation": "Live-Übersetzung",
+            "View": "Ansicht",
+            "View options": "Ansichtsoptionen",
+            "Panel layout": "Panelanordnung",
+            "Side by side": "Nebeneinander",
+            "Stacked": "Untereinander",
             "Suggested response": "Vorgeschlagene Antwort",
             "Copy": "Kopieren",
+            "Copied": "Kopiert",
+            "Show sidebar": "Seitenleiste anzeigen",
+            "Hide sidebar": "Seitenleiste ausblenden",
+            "Expand sidebar": "Seitenleiste erweitern",
+            "Collapse sidebar": "Seitenleiste einklappen",
             "Copy transcript": "Transkript kopieren",
+            "Copy entire transcript": "Gesamtes Transkript kopieren",
+            "Copy entire translation": "Gesamte Übersetzung kopieren",
             "Transcribe": "Transkript",
             "Translate": "Übersetzung",
             "Summarize": "Zusammenfassen",
+            "Meeting notes": "Besprechungsnotizen",
+            "Preparing meeting notes...": "Besprechungsnotizen werden vorbereitet...",
+            "Building meeting notes...": "Besprechungsnotizen werden erstellt...",
+            "No meeting notes yet.": "Noch keine Besprechungsnotizen.",
+            "AI meeting notes failed, showing a local fallback instead.": "KI-Besprechungsnotizen fehlgeschlagen; stattdessen wird eine lokale Fassung angezeigt.",
+            "Meeting notes ready": "Besprechungsnotizen fertig",
+            "Meeting notes missing": "Besprechungsnotizen fehlen",
+            "Meeting notes available": "Besprechungsnotizen verfügbar",
+            "Search transcript, translation, summary, or meeting notes": "Transkript, Übersetzung, Zusammenfassung oder Besprechungsnotizen durchsuchen",
+            "Primary AI action: draft a reply to the latest question.": "Primäre KI-Aktion: Antwort auf die letzte Frage entwerfen.",
+            "Secondary AI actions": "Weitere KI-Aktionen",
             "Billing": "Abrechnung",
             "Start Listening": "Starten",
             "Stop Listening": "Stoppen",
             "Listening": "Hört zu",
+            "Audio detected": "Audio erkannt",
+            "Waiting for audio": "Warten auf Audio",
             "Meeting ended?": "Meeting beendet?",
             "Speechara is still listening.": "Speechara hört noch zu.",
             "The meeting window looks closed.": "Das Meetingfenster scheint geschlossen zu sein.",
@@ -498,7 +589,7 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Current plan": "Aktueller Tarif",
             "Renew": "Verlängern",
             "Open billing in the web app": "Abrechnung in der Web-App öffnen",
-            "Pro beta is free while Speechara is in beta. You will be notified before paid billing begins.": "Pro beta ist kostenlos, solange Speechara in der Beta ist. Wir informieren Sie, bevor kostenpflichtige Abrechnung beginnt.",
+            "Free includes 180 minutes every month, forever, with no credit card required. Pro beta is free while Speechara is in beta.": "Free umfasst jeden Monat 180 Minuten, fuer immer kostenlos und ohne Kreditkarte. Pro beta ist kostenlos, solange Speechara in der Beta ist.",
             "Current period end": "Aktuelles Periodenende",
             "Subscription status": "Abostatus",
             "Transcription access": "Transkriptionszugriff",
@@ -509,8 +600,14 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Select microphone": "Mikrofon auswählen",
             "Refresh microphones": "Mikrofone aktualisieren",
             "Quit Speechara completely": "Speechara vollständig beenden",
+            "Hide completely": "Vollständig ausblenden",
+            "Keep listening with all Speechara windows hidden.": "Weiter zuhören, während alle Speechara-Fenster ausgeblendet sind.",
             "Clear subtitles": "Untertitel löschen",
             "Waiting for speech...": "Warten auf Sprache...",
+            "Listening… Transcript will appear here.": "Wir hören zu… Das Transkript erscheint hier.",
+            "Start listening to see the transcript here.": "Starten Sie die Aufnahme, um das Transkript hier zu sehen.",
+            "Translation will appear as you speak.": "Die Übersetzung erscheint während des Sprechens.",
+            "Live transcript with timestamped speech blocks.": "Live-Transkript mit Zeitstempeln.",
             "Prepare Speechara for live capture": "Speechara für Live-Erfassung vorbereiten",
             "Microphone input": "Mikrofoneingang",
             "Start a Listening Session": "Zuhörsitzung starten",
@@ -545,6 +642,7 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Restart needed": "Neustart nötig",
             "Quit and reopen": "Beenden und neu öffnen",
             "Open Speechara": "Speechara öffnen",
+            "Show Speechara": "Speechara anzeigen",
             "Grant access to continue": "Zugriff gewähren, um fortzufahren",
             "Update": "Aktualisieren",
             "Update %@": "Auf %@ aktualisieren",
@@ -605,12 +703,36 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Microphone is off. Your replies will not be included in the transcript.": "El micrófono está apagado. Tus respuestas no se incluirán en la transcripción.",
             "Hide warning": "Ocultar advertencia",
             "Live transcript": "Transcripción en vivo",
+            "Live translation": "Traducción en vivo",
+            "View": "Vista",
+            "View options": "Opciones de vista",
+            "Panel layout": "Disposición de paneles",
+            "Side by side": "Lado a lado",
+            "Stacked": "Apilados",
             "Suggested response": "Respuesta sugerida",
             "Copy": "Copiar",
+            "Copied": "Copiado",
+            "Show sidebar": "Mostrar barra lateral",
+            "Hide sidebar": "Ocultar barra lateral",
+            "Expand sidebar": "Expandir barra lateral",
+            "Collapse sidebar": "Contraer barra lateral",
             "Copy transcript": "Copiar transcripción",
+            "Copy entire transcript": "Copiar toda la transcripción",
+            "Copy entire translation": "Copiar toda la traducción",
             "Transcribe": "Transcripción",
             "Translate": "Traducción",
             "Summarize": "Resumir",
+            "Meeting notes": "Notas de la reunión",
+            "Preparing meeting notes...": "Preparando las notas de la reunión...",
+            "Building meeting notes...": "Creando las notas de la reunión...",
+            "No meeting notes yet.": "Todavía no hay notas de la reunión.",
+            "AI meeting notes failed, showing a local fallback instead.": "No se pudieron crear las notas con IA; se muestra una versión local.",
+            "Meeting notes ready": "Notas de la reunión listas",
+            "Meeting notes missing": "Faltan las notas de la reunión",
+            "Meeting notes available": "Notas de la reunión disponibles",
+            "Search transcript, translation, summary, or meeting notes": "Buscar en la transcripción, traducción, resumen o notas de la reunión",
+            "Primary AI action: draft a reply to the latest question.": "Acción principal de IA: redactar una respuesta a la última pregunta.",
+            "Secondary AI actions": "Acciones secundarias de IA",
             "Open": "Abrir",
             "Opening…": "Abriendo…",
             "Load more": "Cargar más",
@@ -637,7 +759,7 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Current plan": "Plan actual",
             "Renew": "Renovar",
             "Open billing in the web app": "Abrir facturación en la app web",
-            "Pro beta is free while Speechara is in beta. You will be notified before paid billing begins.": "Pro beta es gratis mientras Speechara esté en beta. Te avisaremos antes de que empiece la facturación de pago.",
+            "Free includes 180 minutes every month, forever, with no credit card required. Pro beta is free while Speechara is in beta.": "Free incluye 180 minutos cada mes, gratis para siempre y sin tarjeta. Pro beta es gratis mientras Speechara esté en beta.",
             "Current period end": "Fin del periodo actual",
             "Subscription status": "Estado de la suscripción",
             "Transcription access": "Acceso a transcripción",
@@ -650,6 +772,8 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Start Listening": "Empezar a escuchar",
             "Stop Listening": "Detener escucha",
             "Listening": "Escuchando",
+            "Audio detected": "Audio detectado",
+            "Waiting for audio": "Esperando audio",
             "Meeting ended?": "¿La reunión terminó?",
             "Speechara is still listening.": "Speechara sigue escuchando.",
             "The meeting window looks closed.": "Parece que la ventana de la reunión se cerró.",
@@ -659,6 +783,10 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Ready to listen": "Listo para escuchar",
             "Preparing session": "Preparando sesión",
             "Waiting for speech...": "Esperando voz...",
+            "Listening… Transcript will appear here.": "Escuchando… La transcripción aparecerá aquí.",
+            "Start listening to see the transcript here.": "Empieza a escuchar para ver aquí la transcripción.",
+            "Translation will appear as you speak.": "La traducción aparecerá mientras hablas.",
+            "Live transcript with timestamped speech blocks.": "Transcripción en vivo con marcas de tiempo.",
             "Show saved recording in Finder": "Mostrar grabación guardada en Finder",
             "Decrease text size": "Reducir tamaño del texto",
             "Increase text size": "Aumentar tamaño del texto",
@@ -666,6 +794,8 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Select microphone": "Seleccionar micrófono",
             "Refresh microphones": "Actualizar micrófonos",
             "Quit Speechara completely": "Cerrar Speechara por completo",
+            "Hide completely": "Ocultar por completo",
+            "Keep listening with all Speechara windows hidden.": "Seguir escuchando con todas las ventanas de Speechara ocultas.",
             "Clear subtitles": "Borrar subtítulos",
             "Hide panel": "Ocultar panel",
             "Prepare Speechara for live capture": "Preparar Speechara para captura en vivo",
@@ -702,6 +832,7 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Restart needed": "Reinicio necesario",
             "Quit and reopen": "Cerrar y volver a abrir",
             "Open Speechara": "Abrir Speechara",
+            "Show Speechara": "Mostrar Speechara",
             "Grant access to continue": "Concede acceso para continuar",
             "Update": "Actualizar",
             "Update %@": "Actualizar a %@",
@@ -762,12 +893,36 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Microphone is off. Your replies will not be included in the transcript.": "Le microphone est désactivé. Vos réponses ne seront pas incluses dans le transcript.",
             "Hide warning": "Masquer l’avertissement",
             "Live transcript": "Transcript en direct",
+            "Live translation": "Traduction en direct",
+            "View": "Affichage",
+            "View options": "Options d’affichage",
+            "Panel layout": "Disposition des panneaux",
+            "Side by side": "Côte à côte",
+            "Stacked": "Empilés",
             "Suggested response": "Réponse suggérée",
             "Copy": "Copier",
+            "Copied": "Copié",
+            "Show sidebar": "Afficher la barre latérale",
+            "Hide sidebar": "Masquer la barre latérale",
+            "Expand sidebar": "Développer la barre latérale",
+            "Collapse sidebar": "Réduire la barre latérale",
             "Copy transcript": "Copier le transcript",
+            "Copy entire transcript": "Copier tout le transcript",
+            "Copy entire translation": "Copier toute la traduction",
             "Transcribe": "Transcript",
             "Translate": "Traduction",
             "Summarize": "Résumer",
+            "Meeting notes": "Notes de réunion",
+            "Preparing meeting notes...": "Préparation des notes de réunion...",
+            "Building meeting notes...": "Création des notes de réunion...",
+            "No meeting notes yet.": "Aucune note de réunion pour le moment.",
+            "AI meeting notes failed, showing a local fallback instead.": "Échec des notes de réunion par IA ; une version locale est affichée.",
+            "Meeting notes ready": "Notes de réunion prêtes",
+            "Meeting notes missing": "Notes de réunion manquantes",
+            "Meeting notes available": "Notes de réunion disponibles",
+            "Search transcript, translation, summary, or meeting notes": "Rechercher dans le transcript, la traduction, le résumé ou les notes de réunion",
+            "Primary AI action: draft a reply to the latest question.": "Action IA principale : rédiger une réponse à la dernière question.",
+            "Secondary AI actions": "Actions IA secondaires",
             "Open": "Ouvrir",
             "Opening…": "Ouverture…",
             "Load more": "Charger plus",
@@ -794,7 +949,7 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Current plan": "Forfait actuel",
             "Renew": "Renouveler",
             "Open billing in the web app": "Ouvrir la facturation dans l’app web",
-            "Pro beta is free while Speechara is in beta. You will be notified before paid billing begins.": "Pro beta est gratuit pendant la beta de Speechara. Vous serez informé avant le début de la facturation payante.",
+            "Free includes 180 minutes every month, forever, with no credit card required. Pro beta is free while Speechara is in beta.": "Free inclut 180 minutes chaque mois, gratuitement pour toujours et sans carte. Pro beta est gratuit pendant la beta de Speechara.",
             "Current period end": "Fin de la période actuelle",
             "Subscription status": "Statut de l’abonnement",
             "Transcription access": "Accès à la transcription",
@@ -807,6 +962,8 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Start Listening": "Démarrer l’écoute",
             "Stop Listening": "Arrêter l’écoute",
             "Listening": "Écoute",
+            "Audio detected": "Audio détecté",
+            "Waiting for audio": "En attente d’audio",
             "Meeting ended?": "Réunion terminée ?",
             "Speechara is still listening.": "Speechara écoute toujours.",
             "The meeting window looks closed.": "La fenêtre de réunion semble fermée.",
@@ -816,6 +973,10 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Ready to listen": "Prêt à écouter",
             "Preparing session": "Préparation de la session",
             "Waiting for speech...": "En attente de la parole...",
+            "Listening… Transcript will appear here.": "Écoute… Le transcript apparaîtra ici.",
+            "Start listening to see the transcript here.": "Démarrez l’écoute pour afficher le transcript ici.",
+            "Translation will appear as you speak.": "La traduction apparaîtra au fil de la conversation.",
+            "Live transcript with timestamped speech blocks.": "Transcript en direct avec horodatage.",
             "Show saved recording in Finder": "Afficher l’enregistrement dans le Finder",
             "Decrease text size": "Réduire la taille du texte",
             "Increase text size": "Augmenter la taille du texte",
@@ -823,6 +984,8 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Select microphone": "Choisir le microphone",
             "Refresh microphones": "Actualiser les microphones",
             "Quit Speechara completely": "Quitter Speechara complètement",
+            "Hide completely": "Masquer complètement",
+            "Keep listening with all Speechara windows hidden.": "Continuer l’écoute avec toutes les fenêtres Speechara masquées.",
             "Clear subtitles": "Effacer les sous-titres",
             "Hide panel": "Masquer le panneau",
             "Prepare Speechara for live capture": "Préparer Speechara pour la capture en direct",
@@ -859,6 +1022,7 @@ final class SpeecharaLocalizationStore: ObservableObject {
             "Restart needed": "Redémarrage nécessaire",
             "Quit and reopen": "Quitter et rouvrir",
             "Open Speechara": "Ouvrir Speechara",
+            "Show Speechara": "Afficher Speechara",
             "Grant access to continue": "Accorder l’accès pour continuer",
             "Update": "Mettre à jour",
             "Update %@": "Mettre à jour vers %@",

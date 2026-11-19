@@ -21,6 +21,11 @@ struct SpeecharaRootView: View {
                 SpeecharaWorkspaceShellView()
             }
         }
+        .onChange(of: authStore.isAuthenticated) { isAuthenticated in
+            if !isAuthenticated {
+                SpeakingNotesWindowController.shared.hideForSignOut()
+            }
+        }
     }
 }
 

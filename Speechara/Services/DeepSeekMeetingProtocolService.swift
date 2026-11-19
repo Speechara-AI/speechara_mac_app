@@ -8,11 +8,11 @@ enum DeepSeekMeetingProtocolError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidResponse:
-            return "The AI backend returned an empty meeting protocol response."
+            return "The AI backend returned an empty meeting notes response."
         case .incompleteResponse:
-            return "The AI backend returned a truncated meeting protocol response."
+            return "The AI backend returned a truncated meeting notes response."
         case .requestFailed(let error):
-            return "The app could not generate a meeting protocol: \(error.localizedDescription)"
+            return "The app could not generate meeting notes: \(error.localizedDescription)"
         }
     }
 }
@@ -78,7 +78,7 @@ actor DeepSeekMeetingProtocolService {
                         Agreed actions
                         Responsible persons (if identifiable from the transcript)
                         Open questions / unresolved points
-                        Do not omit secondary but meaningful discussions — the protocol must reflect the full meeting, not only the main topic.
+                        Do not omit secondary but meaningful discussions — the meeting notes must reflect the full meeting, not only the main topic.
                         Remove conversational noise:
                         repetitions
                         interruptions
@@ -92,7 +92,7 @@ actor DeepSeekMeetingProtocolService {
                         Use professional business style:
                         clear, structured, concise, but sufficiently complete.
                         Output format:
-                        Meeting Protocol
+                        Meeting Notes
                         1. Topics Discussed
                         ...
                         2. Decisions Made

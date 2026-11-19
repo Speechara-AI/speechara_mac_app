@@ -82,6 +82,7 @@ final class SystemAudioCaptureService: @unchecked Sendable {
     private var tapFormat: AVAudioFormat?
     private var streamBytesPerFrame: UInt32 = 0
     private var liveAudioDataHandler: (@Sendable (Data) -> Void)?
+    private var audioLevelHandler: (@Sendable (Double) -> Void)?
     private var liveAudioEncoder = AudioChunkEncoder()
     private var captureError: Error?
     private var isProcessingAudio = false
@@ -92,6 +93,12 @@ final class SystemAudioCaptureService: @unchecked Sendable {
     func setLiveAudioDataHandler(_ handler: (@Sendable (Data) -> Void)?) {
         processingQueue.sync {
             liveAudioDataHandler = handler
+        }
+    }
+
+    func setAudioLevelHandler(_ handler: (@Sendable (Double) -> Void)?) {
+        processingQueue.sync {
+            audioLevelHandler = handler
         }
     }
 
@@ -267,6 +274,7 @@ final class SystemAudioCaptureService: @unchecked Sendable {
                 return
             }
 
+            audioLevelHandler?(Self.normalizedAudioLevel(from: encodedAudio))
             liveAudioDataHandler?(encodedAudio)
             logCaptureDiagnosticsIfNeeded(now: now, reason: "processed")
         } catch {
@@ -363,6 +371,31 @@ final class SystemAudioCaptureService: @unchecked Sendable {
         }
 
         return pcmBuffer
+    }
+
+    private static func normalizedAudioLevel(from pcmData: Data) -> Double {
+        let sampleCount = pcmData.count / MemoryLayout<Int16>.size
+        guard sampleCount > 0 else {
+            return 0
+        }
+
+        let meanSquare = pcmData.withUnsafeBytes { rawBuffer -> Double in
+            let samples = rawBuffer.bindMemory(to: Int16.self)
+            var sumSquares = 0.0
+            for sample in samples.prefix(sampleCount) {
+                let normalized = Double(sample) / Double(Int16.max)
+                sumSquares += normalized * normalized
+            }
+            return sumSquares / Double(sampleCount)
+        }
+
+        guard meanSquare > 0 else {
+            return 0
+        }
+
+        let rms = sqrt(meanSquare)
+        let decibels = 20 * log10(max(rms, 0.000_01))
+        return max(0, min(1, (decibels + 60) / 60))
     }
 
     private static func currentProcessObjectID() throws -> AudioObjectID {

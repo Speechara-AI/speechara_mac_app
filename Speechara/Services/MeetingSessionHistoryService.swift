@@ -10,6 +10,7 @@ struct MeetingSessionHistorySessionParams: Codable, Equatable {
     let source: String
     let appVersion: String?
     let focusMode: Bool?
+    var localSessionID: String? = nil
 }
 
 struct MeetingSessionTranscriptBlock: Codable, Equatable {
@@ -168,6 +169,8 @@ struct MeetingSessionHistorySnapshot: Equatable {
 struct MeetingSessionHistoryRemoteState: Equatable {
     let id: String
     let revision: Int
+    var startedAt: Date? = nil
+    var source: String? = nil
 }
 
 enum MeetingSessionHistoryServiceError: LocalizedError {
@@ -367,6 +370,57 @@ final class MeetingSessionHistoryService {
         return data.meetingSession
     }
 
+    // A legacy draft has no remote ID. Recover only one unambiguous, empty
+    // macOS session near its first turn; never overwrite an unrelated meeting.
+    func findRecoverableSession(
+        snapshot: MeetingSessionHistorySnapshot,
+        allowLegacyRecovery: Bool = false
+    ) async throws -> MeetingSessionHistoryRemoteState? {
+        // Older deployed backends concatenate dateTo with ORDER BY. Page the
+        // ordinary list and apply the bounded time window locally instead.
+        var cursor: String?
+        var seenCursors = Set<String>()
+        var seenSessionIDs = Set<String>()
+        var matches = [MeetingSessionHistoryRemoteState]()
+        repeat {
+            let page = try await fetchSessions(query: MeetingSessionHistoryListQuery(limit: 100, cursor: cursor))
+            for item in page.items where item.processedByApp == "macos"
+                && abs(item.startedAt.timeIntervalSince(snapshot.startedAt)) <= 90
+                && seenSessionIDs.insert(item.id).inserted {
+                let detail = try await fetchSessionDetail(id: item.id)
+                let sameLocalID = snapshot.sessionParams.localSessionID != nil
+                    && detail.sessionParams?.localSessionID == snapshot.sessionParams.localSessionID
+                let emptyLegacySession = allowLegacyRecovery && detail.status == "active"
+                    && detail.sessionParams?.localSessionID == nil
+                    && detail.revision == 1
+                    && (detail.transcriptText ?? "").isEmpty
+                    && (detail.transcriptJson ?? []).isEmpty
+                    && (detail.translationText ?? "").isEmpty
+                    && (detail.translationJson ?? []).isEmpty
+                    && (detail.summaryText ?? "").isEmpty
+                    && (detail.protocolText ?? "").isEmpty
+                    && (detail.suggestedAnswerText ?? "").isEmpty
+                if sameLocalID || emptyLegacySession {
+                    matches.append(MeetingSessionHistoryRemoteState(
+                        id: detail.id, revision: detail.revision,
+                        startedAt: detail.startedAt, source: detail.sessionParams?.source
+                    ))
+                }
+            }
+            // The server sorts by startedAt descending; older pages cannot match.
+            if let oldest = page.items.last?.startedAt,
+               oldest < snapshot.startedAt.addingTimeInterval(-90) { break }
+            cursor = page.nextCursor
+            if let cursor, !seenCursors.insert(cursor).inserted {
+                throw MeetingSessionHistoryServiceError.graphqlRequestFailed("History pagination did not advance. The local draft has been kept.")
+            }
+        } while cursor != nil
+        guard matches.count <= 1 else {
+            throw MeetingSessionHistoryServiceError.graphqlRequestFailed("Several meetings match this local draft. Its text has been kept locally.")
+        }
+        return matches.first
+    }
+
     func startSession(snapshot: MeetingSessionHistorySnapshot) async throws -> MeetingSessionHistoryRemoteState {
         let activeSession = try await resolvedAuthSession()
         let configuration = try makeConfiguration(for: activeSession)
@@ -465,7 +519,7 @@ final class MeetingSessionHistoryService {
     }
 
     func isOutdatedRevisionError(_ error: Error) -> Bool {
-        error.localizedDescription.localizedCaseInsensitiveContains("revision is outdated")
+        error.localizedDescription.range(of: "outdated.*revision|revision.*outdated", options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     private func updateSession(
@@ -598,7 +652,7 @@ final class MeetingSessionHistoryService {
         variables: Variables,
         responseType: ResponseType.Type
     ) async throws -> ResponseType {
-        var request = URLRequest(url: endpoint)
+        var request = URLRequest(url: endpoint, timeoutInterval: 30)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")

@@ -122,7 +122,7 @@ struct SpeecharaProfileView: View {
 
                     if billingSummary.showsBillingAction {
                         SpeecharaProfileStatusStrip(
-                            text: SL("Pro beta is free while Speechara is in beta. You will be notified before paid billing begins."),
+                            text: SL("Free includes 180 minutes every month, forever, with no credit card required. Pro beta is free while Speechara is in beta."),
                             tint: Color(red: 0.17, green: 0.54, blue: 0.95)
                         )
                     }

@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+        B10000000000000000000031 /* SessionDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000029 /* SessionDraft.swift */; };
 		E10000000000000000000003 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = E10000000000000000000002 /* Sparkle */; };
 		B10000000000000000000001 /* SpeecharaApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000001 /* SpeecharaApp.swift */; };
 		B10000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000002 /* ContentView.swift */; };
@@ -36,9 +37,18 @@
 		B10000000000000000000026 /* SpeecharaHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001E /* SpeecharaHistoryView.swift */; };
 		B10000000000000000000027 /* SpeecharaLocalization.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001F /* SpeecharaLocalization.swift */; };
 		B10000000000000000000028 /* SpeecharaUpdateController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000020 /* SpeecharaUpdateController.swift */; };
+		B10000000000000000000029 /* SpeakingNotesModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000021 /* SpeakingNotesModels.swift */; };
+		B1000000000000000000002A /* SpeakingNotesGraphQLService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000022 /* SpeakingNotesGraphQLService.swift */; };
+		B1000000000000000000002B /* SpeakingNotesDraftStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000023 /* SpeakingNotesDraftStore.swift */; };
+		B1000000000000000000002C /* SpeakingNotesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000024 /* SpeakingNotesStore.swift */; };
+		B1000000000000000000002D /* SpeakingNotesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000025 /* SpeakingNotesView.swift */; };
+		B1000000000000000000002E /* SpeakingNoteLanguageDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000026 /* SpeakingNoteLanguageDetector.swift */; };
+		B1000000000000000000002F /* SpeecharaMeetingLanguages.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000027 /* SpeecharaMeetingLanguages.swift */; };
+		B10000000000000000000030 /* SpeecharaInterfaceTranslations.json in Resources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000028 /* SpeecharaInterfaceTranslations.json */; };
 	/* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+        F10000000000000000000029 /* SessionDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionDraft.swift; sourceTree = "<group>"; };
 		F10000000000000000000001 /* SpeecharaApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeecharaApp.swift; sourceTree = "<group>"; };
 		F10000000000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		F10000000000000000000003 /* SubtitleViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitleViewModel.swift; sourceTree = "<group>"; };
@@ -71,6 +81,14 @@
 		F1000000000000000000001E /* SpeecharaHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeecharaHistoryView.swift; sourceTree = "<group>"; };
 		F1000000000000000000001F /* SpeecharaLocalization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeecharaLocalization.swift; sourceTree = "<group>"; };
 		F10000000000000000000020 /* SpeecharaUpdateController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeecharaUpdateController.swift; sourceTree = "<group>"; };
+		F10000000000000000000021 /* SpeakingNotesModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeakingNotesModels.swift; sourceTree = "<group>"; };
+		F10000000000000000000022 /* SpeakingNotesGraphQLService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeakingNotesGraphQLService.swift; sourceTree = "<group>"; };
+		F10000000000000000000023 /* SpeakingNotesDraftStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeakingNotesDraftStore.swift; sourceTree = "<group>"; };
+		F10000000000000000000024 /* SpeakingNotesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeakingNotesStore.swift; sourceTree = "<group>"; };
+		F10000000000000000000025 /* SpeakingNotesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeakingNotesView.swift; sourceTree = "<group>"; };
+		F10000000000000000000026 /* SpeakingNoteLanguageDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeakingNoteLanguageDetector.swift; sourceTree = "<group>"; };
+		F10000000000000000000027 /* SpeecharaMeetingLanguages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeecharaMeetingLanguages.swift; sourceTree = "<group>"; };
+		F10000000000000000000028 /* SpeecharaInterfaceTranslations.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = SpeecharaInterfaceTranslations.json; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -104,6 +122,7 @@
 				G10000000000000000000003 /* Views */,
 				G10000000000000000000004 /* ViewModels */,
 				G10000000000000000000006 /* Services */,
+				G10000000000000000000007 /* Resources */,
 			);
 			path = Speechara;
 			sourceTree = "<group>";
@@ -118,6 +137,7 @@
 				F1000000000000000000001C /* SpeecharaWorkspaceShellView.swift */,
 				F1000000000000000000001D /* SpeecharaProfileView.swift */,
 				F1000000000000000000001E /* SpeecharaHistoryView.swift */,
+				F10000000000000000000025 /* SpeakingNotesView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -126,6 +146,7 @@
 			isa = PBXGroup;
 			children = (
 				F10000000000000000000003 /* SubtitleViewModel.swift */,
+				F10000000000000000000024 /* SpeakingNotesStore.swift */,
 			);
 			path = ViewModels;
 			sourceTree = "<group>";
@@ -158,9 +179,23 @@
 				F10000000000000000000020 /* SpeecharaUpdateController.swift */,
 				F1000000000000000000001A /* AuthService.swift */,
 				F1000000000000000000001B /* MeetingSessionHistoryService.swift */,
+                F10000000000000000000029 /* SessionDraft.swift */,
 				F10000000000000000000017 /* AppPermissionsController.swift */,
+				F10000000000000000000021 /* SpeakingNotesModels.swift */,
+				F10000000000000000000022 /* SpeakingNotesGraphQLService.swift */,
+				F10000000000000000000023 /* SpeakingNotesDraftStore.swift */,
+				F10000000000000000000026 /* SpeakingNoteLanguageDetector.swift */,
+				F10000000000000000000027 /* SpeecharaMeetingLanguages.swift */,
 			);
 			path = Services;
+			sourceTree = "<group>";
+		};
+		G10000000000000000000007 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				F10000000000000000000028 /* SpeecharaInterfaceTranslations.json */,
+			);
+			path = Resources;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -229,6 +264,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B10000000000000000000013 /* Assets.xcassets in Resources */,
+				B10000000000000000000030 /* SpeecharaInterfaceTranslations.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -284,11 +320,19 @@
 				B10000000000000000000021 /* AuthenticationView.swift in Sources */,
 				B10000000000000000000022 /* AuthService.swift in Sources */,
 				B10000000000000000000023 /* MeetingSessionHistoryService.swift in Sources */,
+                B10000000000000000000031 /* SessionDraft.swift in Sources */,
 				B10000000000000000000024 /* SpeecharaWorkspaceShellView.swift in Sources */,
 				B10000000000000000000025 /* SpeecharaProfileView.swift in Sources */,
 				B10000000000000000000026 /* SpeecharaHistoryView.swift in Sources */,
 				B10000000000000000000027 /* SpeecharaLocalization.swift in Sources */,
 				B10000000000000000000028 /* SpeecharaUpdateController.swift in Sources */,
+				B10000000000000000000029 /* SpeakingNotesModels.swift in Sources */,
+				B1000000000000000000002A /* SpeakingNotesGraphQLService.swift in Sources */,
+				B1000000000000000000002B /* SpeakingNotesDraftStore.swift in Sources */,
+				B1000000000000000000002C /* SpeakingNotesStore.swift in Sources */,
+				B1000000000000000000002D /* SpeakingNotesView.swift in Sources */,
+				B1000000000000000000002E /* SpeakingNoteLanguageDetector.swift in Sources */,
+				B1000000000000000000002F /* SpeecharaMeetingLanguages.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -386,7 +430,7 @@
 				CODE_SIGN_ENTITLEMENTS = Speechara/Speechara.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 19;
+				CURRENT_PROJECT_VERSION = 31;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = P7FFVJWCKW;
@@ -402,7 +446,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 1.1.0;
+				MARKETING_VERSION = 2.0.7;
 				PRODUCT_BUNDLE_IDENTIFIER = ai.speechara.mac;
 				PRODUCT_NAME = Speechara;
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -421,7 +465,7 @@
 				CODE_SIGN_ENTITLEMENTS = Speechara/Speechara.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 19;
+				CURRENT_PROJECT_VERSION = 31;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = P7FFVJWCKW;
@@ -437,7 +481,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 1.1.0;
+				MARKETING_VERSION = 2.0.7;
 				PRODUCT_BUNDLE_IDENTIFIER = ai.speechara.mac;
 				PRODUCT_NAME = Speechara;
 				PROVISIONING_PROFILE_SPECIFIER = "";

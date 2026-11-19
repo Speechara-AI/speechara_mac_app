@@ -53,6 +53,7 @@ private enum SpeecharaHistoryDetailTab: String, CaseIterable, Identifiable {
     case transcribe
     case translate
     case summary
+    case speakingNotes
 
     var id: Self { self }
 
@@ -64,6 +65,8 @@ private enum SpeecharaHistoryDetailTab: String, CaseIterable, Identifiable {
             return "Translate"
         case .summary:
             return "Summary"
+        case .speakingNotes:
+            return "Speaking notes"
         }
     }
 
@@ -75,6 +78,8 @@ private enum SpeecharaHistoryDetailTab: String, CaseIterable, Identifiable {
             return "globe"
         case .summary:
             return "sparkles"
+        case .speakingNotes:
+            return "doc.text"
         }
     }
 }
@@ -96,6 +101,9 @@ struct SpeecharaHistoryView: View {
         .scrollIndicators(.hidden)
         .task {
             await viewModel.loadIfNeeded()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .speecharaMeetingHistoryDidChange)) { _ in
+            Task { await viewModel.refresh() }
         }
         .sheet(isPresented: $viewModel.isDetailPresented, onDismiss: viewModel.dismissDetail) {
             SpeecharaHistoryDetailSheet(viewModel: viewModel)
@@ -153,7 +161,7 @@ struct SpeecharaHistoryView: View {
                 .foregroundStyle(SpeecharaHistoryTheme.searchIcon)
 
             TextField(
-                "Search transcript, translation, summary, or protocol",
+                "Search transcript, translation, summary, or meeting notes",
                 text: $viewModel.searchText
             )
             .textFieldStyle(.plain)
@@ -286,6 +294,7 @@ final class SpeecharaHistoryViewModel: ObservableObject {
 
     @Published private(set) var selectedSessionSummary: MeetingSessionHistoryListItem?
     @Published private(set) var selectedSessionDetail: MeetingSessionHistoryDetail?
+    @Published private(set) var selectedSpeakingNoteSnapshot: MeetingSpeakingNoteSnapshot?
     @Published private(set) var isLoadingDetail = false
     @Published private(set) var detailErrorMessage: String?
     @Published private(set) var isSummaryLoading = false
@@ -296,16 +305,19 @@ final class SpeecharaHistoryViewModel: ObservableObject {
 
     private let historyService: MeetingSessionHistoryService
     private let deepSeekSummaryService: DeepSeekSummaryService
+    private let speakingNotesService: SpeakingNotesGraphQLService
     private var hasLoadedInitialPage = false
     private var lastAppliedNormalizedQuery: String?
     private var searchReloadTask: Task<Void, Never>?
 
     init(
         historyService: MeetingSessionHistoryService = MeetingSessionHistoryService(),
-        deepSeekSummaryService: DeepSeekSummaryService = DeepSeekSummaryService()
+        deepSeekSummaryService: DeepSeekSummaryService = DeepSeekSummaryService(),
+        speakingNotesService: SpeakingNotesGraphQLService = SpeakingNotesGraphQLService()
     ) {
         self.historyService = historyService
         self.deepSeekSummaryService = deepSeekSummaryService
+        self.speakingNotesService = speakingNotesService
     }
 
     deinit {
@@ -313,10 +325,6 @@ final class SpeecharaHistoryViewModel: ObservableObject {
     }
 
     func loadIfNeeded() async {
-        guard !hasLoadedInitialPage else {
-            return
-        }
-
         hasLoadedInitialPage = true
         await reload(force: true)
     }
@@ -351,6 +359,7 @@ final class SpeecharaHistoryViewModel: ObservableObject {
     func openSession(_ item: MeetingSessionHistoryListItem) async {
         selectedSessionSummary = item
         selectedSessionDetail = nil
+        selectedSpeakingNoteSnapshot = nil
         detailErrorMessage = nil
         detailSummaryText = nil
         summaryErrorMessage = nil
@@ -366,6 +375,7 @@ final class SpeecharaHistoryViewModel: ObservableObject {
             let detail = try await historyService.fetchSessionDetail(id: item.id)
             selectedSessionDetail = detail
             detailSummaryText = detail.summaryText?.nilIfEmpty
+            selectedSpeakingNoteSnapshot = try? await speakingNotesService.meetingSnapshot(meetingSessionID: item.id)
         } catch {
             detailErrorMessage = error.localizedDescription
         }
@@ -465,6 +475,7 @@ final class SpeecharaHistoryViewModel: ObservableObject {
         isDetailPresented = false
         selectedSessionSummary = nil
         selectedSessionDetail = nil
+        selectedSpeakingNoteSnapshot = nil
         detailErrorMessage = nil
         detailSummaryText = nil
         summaryErrorMessage = nil
@@ -681,7 +692,7 @@ private struct SpeecharaHistorySessionCard: View {
                         )
 
                         SpeecharaHistoryStatusPill(
-                            title: item.hasProtocol ? "Protocol ready" : "Protocol missing",
+                            title: item.hasProtocol ? "Meeting notes ready" : "Meeting notes missing",
                             tint: item.hasProtocol ? Color(red: 0.28, green: 0.76, blue: 0.95) : SpeecharaHistoryTheme.neutralTint
                         )
 
@@ -783,6 +794,7 @@ private struct SpeecharaHistorySessionCard: View {
 }
 
 private struct SpeecharaHistoryDetailSheet: View {
+    @Environment(\.dismiss) private var dismiss
     @ObservedObject var viewModel: SpeecharaHistoryViewModel
 
     var body: some View {
@@ -830,45 +842,70 @@ private struct SpeecharaHistoryDetailSheet: View {
     }
 
     private var detailHeader: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(viewModel.selectedSessionDetail?.resolvedTitle ?? viewModel.selectedSessionSummary?.resolvedTitle ?? "History")
-                .font(.system(size: 34, weight: .bold, design: .rounded))
-                .foregroundStyle(SpeecharaHistoryTheme.primaryText)
+        HStack(alignment: .top, spacing: 18) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(viewModel.selectedSessionDetail?.resolvedTitle ?? viewModel.selectedSessionSummary?.resolvedTitle ?? "History")
+                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                    .foregroundStyle(SpeecharaHistoryTheme.primaryText)
 
-            if let detail = viewModel.selectedSessionDetail {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        SpeecharaHistoryMetaPill(
-                            title: detail.startedAt.formattedForHistory,
-                            systemImage: "calendar"
-                        )
-
-                        SpeecharaHistoryMetaPill(
-                            title: detail.durationLabel,
-                            systemImage: "clock"
-                        )
-
-                        if let wordCount = detail.wordCount {
+                if let detail = viewModel.selectedSessionDetail {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
                             SpeecharaHistoryMetaPill(
-                                title: SLF("%@ words", String(wordCount)),
-                                systemImage: "text.word.spacing"
+                                title: detail.startedAt.formattedForHistory,
+                                systemImage: "calendar"
+                            )
+
+                            SpeecharaHistoryMetaPill(
+                                title: detail.durationLabel,
+                                systemImage: "clock"
+                            )
+
+                            if let wordCount = detail.wordCount {
+                                SpeecharaHistoryMetaPill(
+                                    title: SLF("%@ words", String(wordCount)),
+                                    systemImage: "text.word.spacing"
+                                )
+                            }
+
+                            if let lineCount = detail.lineCount {
+                                SpeecharaHistoryMetaPill(
+                                    title: SLF("%@ lines", String(lineCount)),
+                                    systemImage: "text.alignleft"
+                                )
+                            }
+
+                            SpeecharaHistoryMetaPill(
+                                title: SLF("revision %@", String(detail.revision)),
+                                systemImage: "number"
                             )
                         }
-
-                        if let lineCount = detail.lineCount {
-                            SpeecharaHistoryMetaPill(
-                                title: SLF("%@ lines", String(lineCount)),
-                                systemImage: "text.alignleft"
-                            )
-                        }
-
-                        SpeecharaHistoryMetaPill(
-                            title: SLF("revision %@", String(detail.revision)),
-                            systemImage: "number"
-                        )
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(SpeecharaHistoryTheme.secondaryText)
+                    .frame(width: 34, height: 34)
+                    .background(
+                        Circle()
+                            .fill(SpeecharaHistoryTheme.cardFill)
+                    )
+                    .overlay(
+                        Circle()
+                            .stroke(SpeecharaHistoryTheme.border, lineWidth: 1)
+                    )
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.cancelAction)
+            .help(SL("Close"))
+            .accessibilityLabel(SL("Close"))
         }
     }
 
@@ -886,7 +923,7 @@ private struct SpeecharaHistoryDetailSheet: View {
                 summaryPanel(detail)
 
                 if let protocolText = detail.protocolText?.nilIfEmpty {
-                    SpeecharaHistoryDetailPanel(title: "Protocol") {
+                    SpeecharaHistoryDetailPanel(title: "Meeting notes") {
                         SpeecharaDetailTextContent(text: protocolText)
                     }
                 }
@@ -896,6 +933,55 @@ private struct SpeecharaHistoryDetailSheet: View {
                         SpeecharaDetailTextContent(text: suggestedAnswerText)
                     }
                 }
+            case .speakingNotes:
+                speakingNotesPanel
+            }
+        }
+    }
+
+    private var speakingNotesPanel: some View {
+        SpeecharaHistoryDetailPanel(title: "Speaking notes") {
+            if let snapshot = viewModel.selectedSpeakingNoteSnapshot {
+                let variant = snapshot.content[snapshot.activeLanguage]
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(spacing: 8) {
+                        SpeecharaHistoryMetaPill(title: snapshot.title, systemImage: "doc.text")
+                        SpeecharaHistoryMetaPill(title: snapshot.activeLanguage.displayName, systemImage: "globe")
+                        SpeecharaHistoryMetaPill(title: SLF("revision %@", String(snapshot.speakingNoteRevision)), systemImage: "number")
+                    }
+
+                    if !variant.talkingPoints.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(SL("Talking points"))
+                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                            ForEach(Array(variant.talkingPoints.enumerated()), id: \.element.id) { index, point in
+                                HStack(alignment: .top, spacing: 10) {
+                                    Text("\(index + 1)")
+                                        .font(.system(size: 11, weight: .bold))
+                                        .frame(width: 24, height: 24)
+                                        .overlay(Circle().stroke(SpeecharaHistoryTheme.border))
+                                    Text(point.text)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
+                    }
+
+                    if !variant.speech.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(SL("Speech"))
+                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                            Text(variant.speech)
+                                .font(.system(size: 17, weight: .medium, design: .rounded))
+                                .lineSpacing(7)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+            } else {
+                SpeecharaDetailTextContent(text: SL("No speaking note was attached to this meeting."))
             }
         }
     }
@@ -1010,7 +1096,7 @@ private struct SpeecharaHistoryDetailSheet: View {
                 )
 
                 SpeecharaHistoryStatusPill(
-                    title: detail.hasProtocol ? "Protocol available" : "Protocol missing",
+                    title: detail.hasProtocol ? "Meeting notes available" : "Meeting notes missing",
                     tint: detail.hasProtocol ? Color(red: 0.28, green: 0.76, blue: 0.95) : SpeecharaHistoryTheme.neutralTint
                 )
 

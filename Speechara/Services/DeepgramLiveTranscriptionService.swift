@@ -713,8 +713,7 @@ actor DeepgramLiveTranscriptionService {
                 URLQueryItem(name: "diarize", value: diarize ? "true" : "false"),
                 URLQueryItem(name: "utterances", value: utterances ? "true" : "false"),
                 URLQueryItem(name: "vad_events", value: "true"),
-                URLQueryItem(name: "endpointing", value: "300"),
-                URLQueryItem(name: "utterance_end_ms", value: "1000"),
+                URLQueryItem(name: "endpointing", value: "500"),
             ]
         )
     }

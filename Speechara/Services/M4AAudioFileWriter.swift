@@ -126,25 +126,6 @@ final class M4AAudioFileWriter {
             throw SystemAudioCaptureError.failedToCreateAudioFile
         }
 
-        var audioConverter: AudioConverterRef?
-        var converterSize = UInt32(MemoryLayout<AudioConverterRef?>.size)
-        let converterStatus = ExtAudioFileGetProperty(
-            audioFile,
-            kExtAudioFileProperty_AudioConverter,
-            &converterSize,
-            &audioConverter
-        )
-
-        if converterStatus == noErr, let audioConverter {
-            var bitRate: UInt32 = 128_000
-            _ = AudioConverterSetProperty(
-                audioConverter,
-                kAudioConverterEncodeBitRate,
-                UInt32(MemoryLayout<UInt32>.size),
-                &bitRate
-            )
-        }
-
         self.audioFile = audioFile
     }
 }

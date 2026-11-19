@@ -15,6 +15,7 @@ DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-${OUTPUT_DIR}/DerivedData.noindex}"
 
 APP_PATH="${APP_PATH:-}"
 CUSTOM_BACKGROUND_PATH=""
+LAYOUT_METADATA_PATH=""
 SKIP_BUILD=0
 USE_LAYOUT=1
 USE_BACKGROUND=1
@@ -42,6 +43,8 @@ Options:
   --volume-name NAME Set the mounted volume name shown in Finder.
   --dmg-name NAME    Set the output filename without the .dmg suffix.
   --background PATH  Use a custom PNG/JPG/TIFF background image.
+  --layout-metadata PATH
+                    Reuse Finder layout metadata from a verified branded installer.
   --no-background    Skip the background image entirely.
   --no-layout        Skip Finder layout customization. Useful in headless CI.
   --reveal           Reveal the finished DMG in Finder without opening it.
@@ -321,6 +324,11 @@ while [ $# -gt 0 ]; do
       CUSTOM_BACKGROUND_PATH="$2"
       shift 2
       ;;
+    --layout-metadata)
+      require_value "$@"
+      LAYOUT_METADATA_PATH="$2"
+      shift 2
+      ;;
     --no-background)
       USE_BACKGROUND=0
       shift
@@ -370,12 +378,17 @@ if [ -n "${CUSTOM_BACKGROUND_PATH}" ] && [ ! -f "${CUSTOM_BACKGROUND_PATH}" ]; t
   fail "Background image not found at ${CUSTOM_BACKGROUND_PATH}"
 fi
 
+if [ -n "${LAYOUT_METADATA_PATH}" ]; then
+  [ -f "${LAYOUT_METADATA_PATH}" ] || fail "Finder layout metadata not found at ${LAYOUT_METADATA_PATH}"
+  [ "${USE_LAYOUT}" -eq 1 ] && [ "${USE_BACKGROUND}" -eq 1 ] || fail "Reused layout metadata requires the branded layout and background."
+fi
+
 FINAL_DMG_PATH="${OUTPUT_DIR}/${DMG_NAME}.dmg"
 TEMP_DMG_PATH="${OUTPUT_DIR}/${DMG_NAME}-rw.dmg"
 STAGING_DIR="${OUTPUT_DIR}/staging"
 MOUNT_ROOT="${OUTPUT_DIR}/mount"
 BACKGROUND_DIR="${STAGING_DIR}/.background"
-MOUNT_PATH="${MOUNT_ROOT}/${VOLUME_NAME}"
+MOUNT_PATH=""
 SWIFT_CACHE_ROOT="${OUTPUT_DIR}/swift-cache"
 DEVICE=""
 
@@ -436,6 +449,7 @@ if [ "${DMG_SIZE_MB}" -lt 180 ]; then
 fi
 
 EXISTING_VOLUME_PATH="/Volumes/${VOLUME_NAME}"
+MOUNT_PATH="${EXISTING_VOLUME_PATH}"
 
 if mount | grep -F " on ${EXISTING_VOLUME_PATH} " >/dev/null 2>&1; then
   echo "Detaching existing ${EXISTING_VOLUME_PATH} to avoid Finder layout collisions." >&2
@@ -474,20 +488,26 @@ hdiutil create \
   -size "${DMG_SIZE_MB}m" \
   "${TEMP_DMG_PATH}" >/dev/null
 
-mkdir -p "${MOUNT_ROOT}"
-
 ATTACH_OUTPUT="$(
   hdiutil attach \
     -readwrite \
     -noverify \
     -noautoopen \
-    -mountpoint "${MOUNT_PATH}" \
     "${TEMP_DMG_PATH}"
 )"
 DEVICE="$(printf '%s\n' "${ATTACH_OUTPUT}" | awk '/^\/dev\// { print $1; exit }')"
+ATTACHED_MOUNT_PATH="$(printf '%s\n' "${ATTACH_OUTPUT}" | awk -F'\t' '$NF ~ /^\/Volumes\// { print $NF; exit }')"
 
 if [ -z "${DEVICE}" ]; then
   fail "Unable to determine attached DMG device"
+fi
+
+if [ -n "${ATTACHED_MOUNT_PATH}" ]; then
+  MOUNT_PATH="${ATTACHED_MOUNT_PATH}"
+fi
+
+if [ ! -d "${MOUNT_PATH}" ]; then
+  fail "Unable to determine attached DMG mount path"
 fi
 
 if [ "${USE_LAYOUT}" -eq 1 ]; then
@@ -501,12 +521,15 @@ if [ "${USE_LAYOUT}" -eq 1 ]; then
     chflags hidden "${MOUNT_PATH}/.Trashes" >/dev/null 2>&1 || true
   fi
 
-  if [ -n "${BACKGROUND_FILE_NAME}" ]; then
-    if ! osascript "${SCRIPT_DIR}/configure_dmg_layout.applescript" "${VOLUME_NAME}" "${APP_BUNDLE_NAME}" ".background:${BACKGROUND_FILE_NAME}"; then
+  if [ -n "${LAYOUT_METADATA_PATH}" ]; then
+    echo "Reusing verified branded Finder layout from ${LAYOUT_METADATA_PATH}"
+    cp "${LAYOUT_METADATA_PATH}" "${MOUNT_PATH}/.DS_Store"
+  elif [ -n "${BACKGROUND_FILE_NAME}" ]; then
+    if ! osascript "${SCRIPT_DIR}/configure_dmg_layout.applescript" "${VOLUME_NAME}" "${APP_BUNDLE_NAME}" ".background:${BACKGROUND_FILE_NAME}" "${MOUNT_PATH}"; then
       fail "Finder layout customization failed. Re-run with --no-layout in headless environments."
     fi
   else
-    if ! osascript "${SCRIPT_DIR}/configure_dmg_layout.applescript" "${VOLUME_NAME}" "${APP_BUNDLE_NAME}"; then
+    if ! osascript "${SCRIPT_DIR}/configure_dmg_layout.applescript" "${VOLUME_NAME}" "${APP_BUNDLE_NAME}" "" "${MOUNT_PATH}"; then
       fail "Finder layout customization failed. Re-run with --no-layout in headless environments."
     fi
   fi

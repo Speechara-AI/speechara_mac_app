@@ -68,10 +68,9 @@ actor LocalAudioRecordingService {
 
     private static func makeOutputURL() throws -> URL {
         let fileManager = FileManager.default
-        let baseDirectory = fileManager.urls(for: .downloadsDirectory, in: .userDomainMask).first
-            ?? fileManager.homeDirectoryForCurrentUser
-
-        let outputDirectory = baseDirectory.appendingPathComponent("Speechara", isDirectory: true)
+        let outputDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent("Speechara", isDirectory: true)
+            .appendingPathComponent("Recordings", isDirectory: true)
 
         do {
             try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
@@ -83,7 +82,7 @@ actor LocalAudioRecordingService {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
 
-        let fileName = "CapturedAudio-\(formatter.string(from: Date())).m4a"
+        let fileName = "Speechara-\(formatter.string(from: Date()))-\(UUID().uuidString.prefix(8)).m4a"
         return outputDirectory.appendingPathComponent(fileName)
     }
 }

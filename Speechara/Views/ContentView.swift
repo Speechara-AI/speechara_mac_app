@@ -6,6 +6,16 @@ private enum SpeecharaWorkspaceLayout: String {
     case rows
 }
 
+private enum DialoguePanelKind: String, Equatable {
+    case transcript
+    case translation
+}
+
+private struct DialogueScrollTarget: Equatable {
+    let entryID: UUID
+    let source: DialoguePanelKind
+}
+
 struct ContentView: View {
     @EnvironmentObject private var authStore: AuthSessionStore
     @EnvironmentObject private var viewModel: SubtitleViewModel
@@ -15,6 +25,9 @@ struct ContentView: View {
     @State private var isListeningSetupPresented = false
     @State private var shouldStartListeningAfterSetup = false
     @State private var isMicrophoneOffWarningDismissed = false
+    @State private var hoveredDialogueEntryID: UUID?
+    @State private var dialogueScrollTarget: DialogueScrollTarget?
+    @State private var copiedPanel: DialoguePanelKind?
 
     var body: some View {
         GeometryReader { _ in
@@ -48,7 +61,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .frame(minWidth: 1120, minHeight: 760)
+        .frame(minWidth: minimumWorkspaceWidth, minHeight: 760)
         .sheet(isPresented: $isListeningSetupPresented) {
             ListeningSetupSheet(viewModel: viewModel) {
                 shouldStartListeningAfterSetup = true
@@ -65,6 +78,19 @@ struct ContentView: View {
         }
         .onAppear {
             viewModel.setFocusModeEnabled(isFocusModeEnabled)
+            SpeakingNotesStore.shared.configure(userID: authStore.currentUser?.id)
+            if let userID = authStore.currentUser?.id,
+               !SpeakingNotesStore.shared.windowState.hidden {
+                SpeakingNotesWindowController.shared.show(for: userID)
+            }
+        }
+        .onChange(of: authStore.currentUser?.id) { userID in
+            SpeakingNotesStore.shared.configure(userID: userID)
+            if let userID, !SpeakingNotesStore.shared.windowState.hidden {
+                SpeakingNotesWindowController.shared.show(for: userID)
+            } else if userID == nil {
+                SpeakingNotesWindowController.shared.hideForSignOut()
+            }
         }
         .onChange(of: isFocusModeEnabled) { isEnabled in
             viewModel.setFocusModeEnabled(isEnabled)
@@ -79,6 +105,12 @@ struct ContentView: View {
 
     private var workspaceLayout: SpeecharaWorkspaceLayout {
         SpeecharaWorkspaceLayout(rawValue: workspaceLayoutRawValue) ?? .columns
+    }
+
+    private var minimumWorkspaceWidth: CGFloat {
+        // Columns need room for two readable 360 pt panels, the splitter and
+        // outer padding. Rows can safely use a substantially narrower window.
+        workspaceLayout == .columns ? 800 : 620
     }
 
     private var workspaceLayoutPicker: some View {
@@ -104,7 +136,18 @@ struct ContentView: View {
             let secondSize = max(minimumPanelSize, available - dividerSize - firstSize)
 
             Group {
-                if workspaceLayout == .columns {
+                if usesScrollableRowsWorkspace {
+                    ScrollView {
+                        VStack(spacing: gap) {
+                            transcriptColumn.frame(height: firstSize)
+                            workspaceDivider(available: proxy.size.height)
+                            translationColumn.frame(height: secondSize)
+                            detachedSummaryPanels
+                        }
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .padding(.bottom, 2)
+                    }
+                } else if workspaceLayout == .columns {
                     HStack(alignment: .top, spacing: gap) {
                         transcriptColumn.frame(width: firstSize)
                         workspaceDivider(available: proxy.size.width)
@@ -121,6 +164,68 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .coordinateSpace(name: "speechara-workspace-split")
         }
+    }
+
+    private var usesScrollableRowsWorkspace: Bool {
+        workspaceLayout == .rows
+            && (viewModel.isTranscriptSummaryVisible || viewModel.isTranslationSummaryVisible)
+    }
+
+    @ViewBuilder
+    private var detachedSummaryPanels: some View {
+        if viewModel.isTranscriptSummaryVisible {
+            detachedSummaryPanel(
+                title: viewModel.sourceSummaryPanelTitle,
+                contentText: viewModel.transcriptSummaryText,
+                errorMessage: viewModel.transcriptSummaryErrorMessage,
+                isLoading: viewModel.isTranscriptSummaryLoading,
+                contentFontSize: viewModel.transcriptFontSize,
+                copyAction: viewModel.copyTranscriptSummaryToPasteboard,
+                closeAction: viewModel.hideTranscriptSummary,
+                loadingText: "Summarizing transcript..."
+            )
+        }
+
+        if viewModel.isTranslationSummaryVisible {
+            detachedSummaryPanel(
+                title: viewModel.translationSummaryPanelTitle,
+                contentText: viewModel.translationSummaryText,
+                errorMessage: viewModel.translationSummaryErrorMessage,
+                isLoading: viewModel.isTranslationSummaryLoading,
+                contentFontSize: viewModel.translationFontSize,
+                copyAction: viewModel.copyTranslationSummaryToPasteboard,
+                closeAction: viewModel.hideTranslationSummary,
+                loadingText: "Summarizing translation..."
+            )
+        }
+    }
+
+    private func detachedSummaryPanel(
+        title: String,
+        contentText: String,
+        errorMessage: String?,
+        isLoading: Bool,
+        contentFontSize: CGFloat,
+        copyAction: @escaping () -> Void,
+        closeAction: @escaping () -> Void,
+        loadingText: String
+    ) -> some View {
+        SurfaceCard(isElevated: false) {
+            ResultPanel(
+                title: title,
+                contentText: contentText,
+                errorMessage: errorMessage,
+                isLoading: isLoading,
+                contentFontSize: contentFontSize,
+                copyAction: copyAction,
+                closeAction: closeAction,
+                loadingText: loadingText,
+                emptyText: "No summary yet.",
+                usesInternalScroll: false
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(minHeight: 180)
     }
 
     private func workspaceDivider(available: CGFloat) -> some View {
@@ -157,45 +262,68 @@ struct ContentView: View {
     }
 
     private var heroSection: some View {
-        SurfaceCard(accent: primaryActionTint.opacity(0.16)) {
+        SurfaceCard(accent: primaryActionTint.opacity(0.16), contentPadding: 12) {
             ViewThatFits(in: .horizontal) {
                 fullToolbar
                 compactToolbar
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity)
     }
 
     private var fullToolbar: some View {
         HStack(alignment: .center, spacing: 12) {
-            if !isFocusModeEnabled {
+            if !viewModel.hasActiveSession {
                 PrimaryActionButton(
                     title: primaryActionTitle,
-                    subtitle: viewModel.hasActiveSession ? nil : SL("system audio"),
+                    subtitle: SL("system audio"),
                     systemImage: primaryActionIcon,
                     tint: primaryActionTint,
                     action: handlePrimaryAction
                 )
                 .disabled(primaryActionDisabled)
                 .opacity(primaryActionDisabled ? 0.55 : 1)
+            } else {
+                if !isFocusModeEnabled {
+                    PrimaryActionButton(
+                        title: primaryActionTitle,
+                        subtitle: systemAudioStatusText,
+                        systemImage: primaryActionIcon,
+                        tint: primaryActionTint,
+                        audioLevel: viewModel.systemAudioLevel,
+                        isAudioLevelActive: viewModel.isSystemAudioListening,
+                        action: handlePrimaryAction
+                    )
+                    .disabled(primaryActionDisabled)
+                    .opacity(primaryActionDisabled ? 0.55 : 1)
 
-                MicrophoneControl(
-                    viewModel: viewModel
-                )
+                    MicrophoneControl(
+                        viewModel: viewModel
+                    )
 
-                if showsSessionToolbarControls {
-                    settingsStrip
+                    if showsSessionToolbarControls {
+                        settingsStrip
+                    }
+                }
+
+                if let activityText = viewModel.assistantActivityText {
+                    LiveStatusPill(
+                        title: activityText,
+                        systemImage: "sparkles",
+                        tint: Color(red: 0.56, green: 0.35, blue: 0.88)
+                    )
                 }
             }
 
-            if let activityText = viewModel.assistantActivityText {
-                LiveStatusPill(
-                    title: activityText,
-                    systemImage: "sparkles",
-                    tint: Color(red: 0.56, green: 0.35, blue: 0.88)
-                )
-            }
-
             Spacer(minLength: 12)
+
+            ToolbarSecondaryButton(
+                title: "Speaking notes",
+                systemImage: "square.and.pencil"
+            ) {
+                SpeakingNotesWindowController.shared.show(for: authStore.currentUser?.id)
+            }
 
             ToolbarSecondaryButton(
                 title: "New",
@@ -212,11 +340,12 @@ struct ContentView: View {
                 isFocusModeEnabled.toggle()
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var compactToolbar: some View {
         HStack(alignment: .center, spacing: 10) {
-            if !isFocusModeEnabled {
+            if !viewModel.hasActiveSession {
                 PrimaryActionButton(
                     title: primaryActionTitle,
                     subtitle: nil,
@@ -226,21 +355,44 @@ struct ContentView: View {
                 )
                 .disabled(primaryActionDisabled)
                 .opacity(primaryActionDisabled ? 0.55 : 1)
+            } else {
+                if !isFocusModeEnabled {
+                    PrimaryActionButton(
+                        title: primaryActionTitle,
+                        subtitle: nil,
+                        systemImage: primaryActionIcon,
+                        tint: primaryActionTint,
+                        audioLevel: viewModel.systemAudioLevel,
+                        isAudioLevelActive: viewModel.isSystemAudioListening,
+                        action: handlePrimaryAction
+                    )
+                    .disabled(primaryActionDisabled)
+                    .opacity(primaryActionDisabled ? 0.55 : 1)
 
-                MicrophoneControl(
-                    viewModel: viewModel
-                )
+                    MicrophoneControl(
+                        viewModel: viewModel
+                    )
 
-                if showsSessionToolbarControls {
-                    sessionSettingsMenu
+                    if showsSessionToolbarControls {
+                        settingsStrip
+                    }
                 }
             }
 
             Spacer(minLength: 8)
 
             ToolbarSecondaryButton(
+                title: "Speaking notes",
+                systemImage: "square.and.pencil",
+                showsTitle: false
+            ) {
+                SpeakingNotesWindowController.shared.show(for: authStore.currentUser?.id)
+            }
+
+            ToolbarSecondaryButton(
                 title: "New",
-                systemImage: "plus.circle"
+                systemImage: "plus.circle",
+                showsTitle: false
             ) {
                 viewModel.startNewSession()
             }
@@ -248,11 +400,13 @@ struct ContentView: View {
             ToolbarSecondaryButton(
                 title: isFocusModeEnabled ? "Exit" : "Focus",
                 systemImage: isFocusModeEnabled ? "rectangle.compress.vertical" : "rectangle.expand.vertical",
-                isActive: isFocusModeEnabled
+                isActive: isFocusModeEnabled,
+                showsTitle: false
             ) {
                 isFocusModeEnabled.toggle()
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var showsSessionToolbarControls: Bool {
@@ -309,188 +463,37 @@ struct ContentView: View {
     }
 
     private var settingsStrip: some View {
-        HStack(spacing: 12) {
-            Menu {
-                ForEach(SourceLanguageOption.allCases) { language in
-                    Button(language.displayName) {
-                        viewModel.selectedSourceLanguage = language
-                    }
-                }
-            } label: {
-                SettingStripPill(
-                    title: "IN",
-                    value: viewModel.selectedSourceLanguage.deepgramLanguageCode.uppercased(),
-                    systemImage: "ear",
-                    showsChevron: true
-                )
-                .help(SLF("Input: %@", viewModel.selectedSourceLanguage.displayName))
-            }
-            .menuStyle(.borderlessButton)
-
-            Button {
-                viewModel.isAudioRecordingEnabled.toggle()
-            } label: {
-                SettingStripPill(
-                    title: "REC",
-                    value: viewModel.isAudioRecordingEnabled ? "On" : "Off",
-                    systemImage: "waveform",
-                    tint: viewModel.isAudioRecordingEnabled ? Color(red: 0.10, green: 0.59, blue: 0.46) : .secondary
-                )
-                .help(viewModel.isAudioRecordingEnabled ? SL("Audio recording is enabled") : SL("Audio recording is disabled"))
-            }
-            .buttonStyle(.plain)
-
-            Menu {
-                Button(SL("Off")) {
-                    viewModel.isTranslationEnabled = false
-                }
-
-                Divider()
-
-                ForEach(viewModel.availableTranslationLanguages) { language in
-                    Button(language.displayName) {
-                        viewModel.isTranslationEnabled = true
-                        viewModel.selectedTranslationLanguage = language
-                    }
-                }
-            } label: {
-                SettingStripPill(
-                    title: nil,
-                    value: nil,
-                    systemImage: "translate",
-                    tint: viewModel.isTranslationEnabled ? Color(red: 0.40, green: 0.44, blue: 0.92) : .secondary,
-                    showsChevron: true
-                )
-                .help(viewModel.translationSummary)
-            }
-            .menuStyle(.borderlessButton)
-        }
-    }
-
-    private var sessionSettingsMenu: some View {
-        Menu {
-            Menu(SL("Input language")) {
-                ForEach(SourceLanguageOption.allCases) { language in
-                    Button {
-                        viewModel.selectedSourceLanguage = language
-                    } label: {
-                        Label(
-                            language.displayName,
-                            systemImage: language == viewModel.selectedSourceLanguage ? "checkmark" : "ear"
-                        )
-                    }
-                }
-            }
-
-            Menu(SL("Translation")) {
-                Button {
-                    viewModel.isTranslationEnabled = false
-                } label: {
-                    Label(SL("Off"), systemImage: viewModel.isTranslationEnabled ? "globe.slash" : "checkmark")
-                }
-
-                Divider()
-
-                ForEach(viewModel.availableTranslationLanguages) { language in
-                    Button {
-                        viewModel.isTranslationEnabled = true
-                        viewModel.selectedTranslationLanguage = language
-                    } label: {
-                        Label(
-                            language.displayName,
-                            systemImage: viewModel.isTranslationEnabled && language == viewModel.selectedTranslationLanguage ? "checkmark" : "globe"
-                        )
-                    }
-                }
-            }
-
-            Button {
-                viewModel.isAudioRecordingEnabled.toggle()
-            } label: {
-                Label(
-                    viewModel.isAudioRecordingEnabled ? SL("Recording: On") : SL("Recording: Off"),
-                    systemImage: viewModel.isAudioRecordingEnabled ? "waveform" : "waveform.slash"
-                )
-            }
-
-            if viewModel.canRevealLastRecording {
-                Divider()
-
-                Button {
-                    viewModel.revealLastRecordingInFinder()
-                } label: {
-                    Label(SL("Show saved recording in Finder"), systemImage: "folder")
-                }
-            }
+        Button {
+            viewModel.toggleAudioRecording()
         } label: {
             SettingStripPill(
-                title: "Session",
-                value: sessionSummaryCode,
-                systemImage: "slider.horizontal.3",
-                showsChevron: true
+                title: "REC",
+                value: viewModel.isAudioRecordingEnabled ? "On" : "Off",
+                systemImage: "waveform",
+                tint: viewModel.isAudioRecordingEnabled ? Color(red: 0.10, green: 0.59, blue: 0.46) : .secondary
             )
+            .help(viewModel.isAudioRecordingEnabled ? SL("Audio recording is enabled") : SL("Audio recording is disabled"))
         }
-        .menuStyle(.borderlessButton)
-        .help(SL("Session settings"))
-    }
-
-    private var sessionSummaryCode: String {
-        let input = viewModel.selectedSourceLanguage.deepgramLanguageCode.uppercased()
-        let translation = viewModel.isTranslationEnabled
-            ? viewModel.selectedTranslationLanguage.languageCode.uppercased()
-            : "Off"
-        return "\(input) / \(translation)"
+        .buttonStyle(.plain)
+        .disabled(viewModel.isBusy)
     }
 
     private var transcriptColumn: some View {
-        SurfaceCard {
+        SurfaceCard(contentPadding: 12, isElevated: false) {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .center, spacing: 10) {
-                    Text(SL("Live transcript"))
-                        .font(.title3.weight(.bold))
-                        .help(SL("Editable during testing, with timestamped blocks."))
+                transcriptPanelHeader
 
-                    Spacer()
+                Divider()
+                    .opacity(0.65)
 
-                    FontSizeControls(
-                        canDecrease: viewModel.canDecreaseTranscriptFontSize,
-                        canIncrease: viewModel.canIncreaseTranscriptFontSize,
-                        onDecrease: viewModel.decreaseTranscriptFontSize,
-                        onIncrease: viewModel.increaseTranscriptFontSize
-                    )
-
-                    Divider().frame(height: 18)
-                    workspaceLayoutPicker
-                    Divider().frame(height: 18)
-
-                    SummaryButton(
-                        title: viewModel.sourceSummaryButtonTitle,
-                        isEnabled: viewModel.canSummarizeSource,
-                        action: viewModel.summarizeSourceText
-                    )
-
-                    PanelActionButton(
-                        title: viewModel.sourceProtocolButtonTitle,
-                        isEnabled: viewModel.canGenerateSourceProtocol,
-                        action: viewModel.generateSourceProtocol,
-                        helpText: "Create a full structured meeting protocol from this transcript."
-                    )
-
-                    PanelActionButton(
-                        title: viewModel.sourceAnswerButtonTitle,
-                        isEnabled: viewModel.canSuggestSourceAnswer,
-                        action: viewModel.suggestSourceAnswer,
-                        helpText: "Draft a suggested reply to the latest question in this transcript.",
-                        accentColor: Color(red: 0.22, green: 0.46, blue: 0.96)
-                    )
-                }
-
-                if viewModel.isTranscriptSummaryVisible {
+                if viewModel.isTranscriptSummaryVisible && !usesScrollableRowsWorkspace {
                     VSplitView {
                         historyPanel(
+                            panelKind: .transcript,
                             text: viewModel.subtitlesText,
                             entries: viewModel.transcriptEntries,
                             draftText: viewModel.liveSubtitlePreview,
+                            draftTimestamp: viewModel.liveUtteranceTimestamp,
                             fontSize: viewModel.transcriptFontSize,
                             isDialogueMode: true,
                             placeholder: viewModel.transcriptPlaceholderText
@@ -502,6 +505,7 @@ struct ContentView: View {
                             contentText: viewModel.transcriptSummaryText,
                             errorMessage: viewModel.transcriptSummaryErrorMessage,
                             isLoading: viewModel.isTranscriptSummaryLoading,
+                            contentFontSize: viewModel.transcriptFontSize,
                             copyAction: viewModel.copyTranscriptSummaryToPasteboard,
                             closeAction: viewModel.hideTranscriptSummary,
                             loadingText: "Summarizing transcript...",
@@ -513,9 +517,11 @@ struct ContentView: View {
                 } else if viewModel.isTranscriptProtocolVisible {
                     VSplitView {
                         historyPanel(
+                            panelKind: .transcript,
                             text: viewModel.subtitlesText,
                             entries: viewModel.transcriptEntries,
                             draftText: viewModel.liveSubtitlePreview,
+                            draftTimestamp: viewModel.liveUtteranceTimestamp,
                             fontSize: viewModel.transcriptFontSize,
                             isDialogueMode: true,
                             placeholder: viewModel.transcriptPlaceholderText
@@ -527,19 +533,22 @@ struct ContentView: View {
                             contentText: viewModel.transcriptProtocolText,
                             errorMessage: viewModel.transcriptProtocolErrorMessage,
                             isLoading: viewModel.isTranscriptProtocolLoading,
+                            contentFontSize: viewModel.transcriptFontSize,
                             copyAction: viewModel.copyTranscriptProtocolToPasteboard,
                             closeAction: viewModel.hideTranscriptProtocol,
-                            loadingText: "Building meeting protocol...",
-                            emptyText: "No protocol yet."
+                            loadingText: "Building meeting notes...",
+                            emptyText: "No meeting notes yet."
                         )
                         .frame(minHeight: 130)
                     }
                     .frame(maxHeight: .infinity)
                 } else {
                     historyPanel(
+                        panelKind: .transcript,
                         text: viewModel.subtitlesText,
                         entries: viewModel.transcriptEntries,
                         draftText: viewModel.liveSubtitlePreview,
+                        draftTimestamp: viewModel.liveUtteranceTimestamp,
                         fontSize: viewModel.transcriptFontSize,
                         isDialogueMode: true,
                         placeholder: viewModel.transcriptPlaceholderText
@@ -552,7 +561,7 @@ struct ContentView: View {
     }
 
     private var assistantColumn: some View {
-        SurfaceCard(accent: Color.orange.opacity(0.18)) {
+        SurfaceCard(accent: Color.orange.opacity(0.18), isElevated: false) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 10) {
                     Label(SL("Suggested response"), systemImage: "sparkles")
@@ -577,6 +586,9 @@ struct ContentView: View {
                     }
                 }
 
+                Divider()
+                    .opacity(0.65)
+
                 SmartAssistantPanel(
                     contentText: viewModel.transcriptAnswerText,
                     errorMessage: viewModel.transcriptAnswerErrorMessage,
@@ -590,45 +602,21 @@ struct ContentView: View {
     }
 
     private var translationColumn: some View {
-        SurfaceCard {
+        SurfaceCard(contentPadding: 12, isElevated: false) {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 10) {
-                    Text(viewModel.translationPanelTitle)
-                        .font(.title3.weight(.bold))
-                        .help(SL("The translation stays secondary to the live transcript and fills in only when final text is ready."))
+                translationPanelHeader
 
-                    Spacer()
+                Divider()
+                    .opacity(0.65)
 
-                    FontSizeControls(
-                        canDecrease: viewModel.canDecreaseTranslationFontSize,
-                        canIncrease: viewModel.canIncreaseTranslationFontSize,
-                        onDecrease: viewModel.decreaseTranslationFontSize,
-                        onIncrease: viewModel.increaseTranslationFontSize
-                    )
-
-                    Divider().frame(height: 18)
-
-                    SummaryButton(
-                        title: viewModel.translationSummaryButtonTitle,
-                        isEnabled: viewModel.canSummarizeTranslation,
-                        action: viewModel.summarizeTranslatedText
-                    )
-
-                    PanelActionButton(
-                        title: viewModel.translationProtocolButtonTitle,
-                        isEnabled: viewModel.canGenerateTranslationProtocol,
-                        action: viewModel.generateTranslatedProtocol,
-                        helpText: "Create a full structured meeting protocol in the selected translation language."
-                    )
-
-                }
-
-                if viewModel.isTranslationSummaryVisible {
+                if viewModel.isTranslationSummaryVisible && !usesScrollableRowsWorkspace {
                     VSplitView {
                         historyPanel(
+                            panelKind: .translation,
                             text: viewModel.translatedText,
                             entries: viewModel.translationEntries,
                             draftText: viewModel.liveTranslationPreview,
+                            draftTimestamp: viewModel.liveUtteranceTimestamp,
                             fontSize: viewModel.translationFontSize,
                             isDialogueMode: true,
                             placeholder: viewModel.translationPlaceholderText
@@ -640,6 +628,7 @@ struct ContentView: View {
                             contentText: viewModel.translationSummaryText,
                             errorMessage: viewModel.translationSummaryErrorMessage,
                             isLoading: viewModel.isTranslationSummaryLoading,
+                            contentFontSize: viewModel.translationFontSize,
                             copyAction: viewModel.copyTranslationSummaryToPasteboard,
                             closeAction: viewModel.hideTranslationSummary,
                             loadingText: "Summarizing translation...",
@@ -651,9 +640,11 @@ struct ContentView: View {
                 } else if viewModel.isTranslationProtocolVisible {
                     VSplitView {
                         historyPanel(
+                            panelKind: .translation,
                             text: viewModel.translatedText,
                             entries: viewModel.translationEntries,
                             draftText: viewModel.liveTranslationPreview,
+                            draftTimestamp: viewModel.liveUtteranceTimestamp,
                             fontSize: viewModel.translationFontSize,
                             isDialogueMode: true,
                             placeholder: viewModel.translationPlaceholderText
@@ -665,10 +656,11 @@ struct ContentView: View {
                             contentText: viewModel.translationProtocolText,
                             errorMessage: viewModel.translationProtocolErrorMessage,
                             isLoading: viewModel.isTranslationProtocolLoading,
+                            contentFontSize: viewModel.translationFontSize,
                             copyAction: viewModel.copyTranslationProtocolToPasteboard,
                             closeAction: viewModel.hideTranslationProtocol,
-                            loadingText: "Building meeting protocol...",
-                            emptyText: "No protocol yet."
+                            loadingText: "Building meeting notes...",
+                            emptyText: "No meeting notes yet."
                         )
                         .frame(minHeight: 130)
                     }
@@ -676,9 +668,11 @@ struct ContentView: View {
                 } else if viewModel.isTranslationAnswerVisible {
                     VSplitView {
                         historyPanel(
+                            panelKind: .translation,
                             text: viewModel.translatedText,
                             entries: viewModel.translationEntries,
                             draftText: viewModel.liveTranslationPreview,
+                            draftTimestamp: viewModel.liveUtteranceTimestamp,
                             fontSize: viewModel.translationFontSize,
                             isDialogueMode: true,
                             placeholder: viewModel.translationPlaceholderText
@@ -690,6 +684,7 @@ struct ContentView: View {
                             contentText: viewModel.translationAnswerText,
                             errorMessage: viewModel.translationAnswerErrorMessage,
                             isLoading: viewModel.isTranslationAnswerLoading,
+                            contentFontSize: viewModel.translationFontSize,
                             copyAction: viewModel.copyTranslationAnswerToPasteboard,
                             closeAction: viewModel.hideTranslationAnswer,
                             loadingText: "Suggesting a translated answer...",
@@ -700,9 +695,11 @@ struct ContentView: View {
                     .frame(maxHeight: .infinity)
                 } else {
                     historyPanel(
+                        panelKind: .translation,
                         text: viewModel.translatedText,
                         entries: viewModel.translationEntries,
                         draftText: viewModel.liveTranslationPreview,
+                        draftTimestamp: viewModel.liveUtteranceTimestamp,
                         fontSize: viewModel.translationFontSize,
                         isDialogueMode: true,
                         placeholder: viewModel.translationPlaceholderText
@@ -712,6 +709,273 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(maxHeight: .infinity)
+    }
+
+    private var transcriptPanelHeader: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                panelIdentity(
+                    title: "Live transcript",
+                    systemImage: "captions.bubble.fill",
+                    languageCode: viewModel.selectedSourceLanguage.deepgramLanguageCode.uppercased(),
+                    languageName: viewModel.selectedSourceLanguage.displayName,
+                    isCompact: false
+                )
+
+                Spacer(minLength: 8)
+
+                FontSizeControls(
+                    currentSize: viewModel.transcriptFontSize,
+                    canDecrease: viewModel.canDecreaseTranscriptFontSize,
+                    canIncrease: viewModel.canIncreaseTranscriptFontSize,
+                    onDecrease: viewModel.decreaseTranscriptFontSize,
+                    onIncrease: viewModel.increaseTranscriptFontSize
+                )
+
+                transcriptCopyButton
+
+                Divider().frame(height: 18)
+                workspaceLayoutPicker
+                transcriptAIActionBlock
+            }
+
+            HStack(spacing: 8) {
+                panelIdentity(
+                    title: "Live transcript",
+                    systemImage: "captions.bubble.fill",
+                    languageCode: viewModel.selectedSourceLanguage.deepgramLanguageCode.uppercased(),
+                    languageName: viewModel.selectedSourceLanguage.displayName,
+                    isCompact: true
+                )
+
+                Spacer(minLength: 4)
+                transcriptCopyButton
+                transcriptAIActionBlock(isCompact: true)
+                transcriptViewMenu
+            }
+        }
+    }
+
+    private var translationPanelHeader: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                panelIdentity(
+                    title: "Live translation",
+                    systemImage: "globe",
+                    languageCode: viewModel.selectedTranslationLanguage.languageCode.uppercased(),
+                    languageName: viewModel.selectedTranslationLanguage.displayName,
+                    isCompact: false
+                )
+
+                Spacer(minLength: 8)
+
+                FontSizeControls(
+                    currentSize: viewModel.translationFontSize,
+                    canDecrease: viewModel.canDecreaseTranslationFontSize,
+                    canIncrease: viewModel.canIncreaseTranslationFontSize,
+                    onDecrease: viewModel.decreaseTranslationFontSize,
+                    onIncrease: viewModel.increaseTranslationFontSize
+                )
+
+                translationCopyButton
+                translationAIActionBlock
+            }
+
+            HStack(spacing: 8) {
+                panelIdentity(
+                    title: "Live translation",
+                    systemImage: "globe",
+                    languageCode: viewModel.selectedTranslationLanguage.languageCode.uppercased(),
+                    languageName: viewModel.selectedTranslationLanguage.displayName,
+                    isCompact: true
+                )
+
+                Spacer(minLength: 4)
+                translationCopyButton
+                translationAIActionBlock(isCompact: true)
+                translationViewMenu
+            }
+        }
+    }
+
+    private func panelIdentity(
+        title: String,
+        systemImage: String,
+        languageCode: String,
+        languageName: String,
+        isCompact: Bool
+    ) -> some View {
+        HStack(spacing: 8) {
+            if isCompact {
+                Image(systemName: systemImage)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+                    .help(SL(title))
+                    .accessibilityLabel(SL(title))
+            } else {
+                Text(SL(title))
+                    .font(.title3.weight(.bold))
+                    .lineLimit(1)
+            }
+
+            LanguageCodeBadge(code: languageCode, languageName: languageName)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var transcriptCopyButton: some View {
+        copyAllButton(
+            panel: .transcript,
+            helpText: "Copy entire transcript",
+            isEnabled: !viewModel.subtitlesText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            action: viewModel.copyTranscriptToPasteboard
+        )
+    }
+
+    private var translationCopyButton: some View {
+        copyAllButton(
+            panel: .translation,
+            helpText: "Copy entire translation",
+            isEnabled: !viewModel.translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            action: viewModel.copyTranslationToPasteboard
+        )
+    }
+
+    private var transcriptAIActionBlock: some View {
+        transcriptAIActionBlock(isCompact: false)
+    }
+
+    private func transcriptAIActionBlock(isCompact: Bool) -> some View {
+        AIActionBlock(
+            suggestTitle: viewModel.sourceAnswerButtonTitle,
+            canSuggest: viewModel.canSuggestSourceAnswer,
+            isSuggesting: viewModel.isTranscriptAnswerLoading,
+            suggestAction: viewModel.suggestSourceAnswer,
+            summaryTitle: viewModel.sourceSummaryButtonTitle,
+            canSummarize: viewModel.canSummarizeSource,
+            summaryAction: viewModel.summarizeSourceText,
+            canCreateMeetingNotes: viewModel.canGenerateSourceProtocol,
+            meetingNotesAction: viewModel.generateSourceProtocol,
+            isCompact: isCompact
+        )
+    }
+
+    private var translationAIActionBlock: some View {
+        translationAIActionBlock(isCompact: false)
+    }
+
+    private func translationAIActionBlock(isCompact: Bool) -> some View {
+        AIActionBlock(
+            suggestTitle: viewModel.translationAnswerButtonTitle,
+            canSuggest: viewModel.canSuggestTranslationAnswer,
+            isSuggesting: viewModel.isTranslationAnswerLoading,
+            suggestAction: viewModel.suggestTranslatedAnswer,
+            summaryTitle: viewModel.translationSummaryButtonTitle,
+            canSummarize: viewModel.canSummarizeTranslation,
+            summaryAction: viewModel.summarizeTranslatedText,
+            canCreateMeetingNotes: viewModel.canGenerateTranslationProtocol,
+            meetingNotesAction: viewModel.generateTranslatedProtocol,
+            isCompact: isCompact
+        )
+    }
+
+    private var transcriptViewMenu: some View {
+        panelViewMenu(
+            canDecrease: viewModel.canDecreaseTranscriptFontSize,
+            canIncrease: viewModel.canIncreaseTranscriptFontSize,
+            onDecrease: viewModel.decreaseTranscriptFontSize,
+            onIncrease: viewModel.increaseTranscriptFontSize
+        )
+    }
+
+    private var translationViewMenu: some View {
+        panelViewMenu(
+            canDecrease: viewModel.canDecreaseTranslationFontSize,
+            canIncrease: viewModel.canIncreaseTranslationFontSize,
+            onDecrease: viewModel.decreaseTranslationFontSize,
+            onIncrease: viewModel.increaseTranslationFontSize
+        )
+    }
+
+    private func panelViewMenu(
+        canDecrease: Bool,
+        canIncrease: Bool,
+        onDecrease: @escaping () -> Void,
+        onIncrease: @escaping () -> Void
+    ) -> some View {
+        Menu {
+            Button(action: onDecrease) {
+                Label(SL("Decrease text size"), systemImage: "textformat.size.smaller")
+            }
+            .disabled(!canDecrease)
+
+            Button(action: onIncrease) {
+                Label(SL("Increase text size"), systemImage: "textformat.size.larger")
+            }
+            .disabled(!canIncrease)
+
+            Divider()
+
+            Picker(SL("Panel layout"), selection: $workspaceLayoutRawValue) {
+                Label(SL("Side by side"), systemImage: "rectangle.split.2x1")
+                    .tag(SpeecharaWorkspaceLayout.columns.rawValue)
+                Label(SL("Stacked"), systemImage: "rectangle.split.1x2")
+                    .tag(SpeecharaWorkspaceLayout.rows.rawValue)
+            }
+        } label: {
+            Label(SL("View"), systemImage: "slider.horizontal.3")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 9)
+                .frame(height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.primary.opacity(0.06))
+                )
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help(SL("View options"))
+    }
+
+    private func copyAllButton(
+        panel: DialoguePanelKind,
+        helpText: String,
+        isEnabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        let isCopied = copiedPanel == panel
+
+        return Button {
+            action()
+            showCopyConfirmation(for: panel)
+        } label: {
+            Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                .font(.system(size: 12, weight: .bold))
+                .frame(width: 30, height: 28)
+        }
+        .buttonStyle(FeedbackToolbarButtonStyle(isConfirmed: isCopied))
+        .disabled(!isEnabled)
+        .help(isCopied ? SL("Copied") : SL(helpText))
+        .accessibilityLabel(isCopied ? SL("Copied") : SL(helpText))
+    }
+
+    private func showCopyConfirmation(for panel: DialoguePanelKind) {
+        withAnimation(.easeOut(duration: 0.12)) {
+            copiedPanel = panel
+        }
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard copiedPanel == panel else {
+                return
+            }
+
+            withAnimation(.easeOut(duration: 0.18)) {
+                copiedPanel = nil
+            }
+        }
     }
 
     private var clearSubtitlesButton: some View {
@@ -744,6 +1008,10 @@ struct ContentView: View {
         viewModel.hasActiveSession
             ? viewModel.isBusy || viewModel.isMicrophoneBusy
             : authStore.isRestoringSession || !authStore.isAuthenticated || !viewModel.canStartSystemListening
+    }
+
+    private var systemAudioStatusText: String {
+        viewModel.systemAudioSignalDetected ? SL("Audio detected") : SL("Waiting for audio")
     }
 
     private func handlePrimaryAction() {
@@ -797,17 +1065,15 @@ struct ContentView: View {
             placeholder: placeholder
         )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
-            )
     }
 
     @ViewBuilder
     private func historyPanel(
+        panelKind: DialoguePanelKind,
         text: String,
         entries: [DialogueEntry],
         draftText: String,
+        draftTimestamp: Date?,
         fontSize: CGFloat,
         isDialogueMode: Bool,
         placeholder: String
@@ -816,27 +1082,28 @@ struct ContentView: View {
             if entries.isEmpty
                 && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                EmptyPanelPlaceholder(text: placeholder)
+                EmptyPanelPlaceholder(
+                    text: placeholder,
+                    isWorkspaceEmptyState: true,
+                    animatesWaveform: viewModel.hasActiveSession
+                )
             } else if isDialogueMode {
                 DialogueHistoryPanel(
                     entries: entries,
                     fontSize: fontSize,
                     speakerLabel: viewModel.speakerDisplayLabel(for:),
-                    draftText: draftText
+                    draftText: draftText,
+                    draftTimestamp: draftTimestamp,
+                    draftID: viewModel.liveUtteranceID,
+                    hoveredEntryID: $hoveredDialogueEntryID,
+                    panelKind: panelKind,
+                    scrollTarget: $dialogueScrollTarget
                 )
             } else {
                 ReadOnlyTextPanel(text: text, draftText: draftText, fontSize: fontSize)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(Color.secondary.opacity(0.05))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
-        )
     }
 }
 
@@ -847,32 +1114,26 @@ private struct EditableTextPanel: View {
     let placeholder: String
 
     var body: some View {
-        VStack(spacing: 0) {
-            ZStack(alignment: .topLeading) {
-                if text.isEmpty && draftText.isEmpty {
-                    Text(placeholder)
-                        .font(.system(size: fontSize, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 14)
-                        .allowsHitTesting(false)
-                }
-
-                AutoScrollingEditableTextView(
-                    text: $text,
-                    draftText: "",
-                    fontSize: fontSize
-                )
-                    .padding(8)
+        ZStack(alignment: .topLeading) {
+            if text.isEmpty && draftText.isEmpty {
+                Text(placeholder)
+                    .font(.system(size: fontSize))
+                    .lineSpacing(fontSize * 0.32)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
+                    .allowsHitTesting(false)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            LiveDraftStrip(text: draftText, fontSize: fontSize)
+            AutoScrollingEditableTextView(
+                text: $text,
+                draftText: draftText,
+                fontSize: fontSize
+            )
+                .padding(8)
         }
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(Color.secondary.opacity(0.05))
-        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
     }
 }
 
@@ -880,6 +1141,11 @@ private struct AutoScrollingEditableTextView: NSViewRepresentable {
     @Binding var text: String
     let draftText: String
     let fontSize: CGFloat
+    fileprivate static let readingParagraphStyle: NSParagraphStyle = {
+        let style = NSMutableParagraphStyle()
+        style.lineHeightMultiple = 1.5
+        return style
+    }()
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -905,7 +1171,14 @@ private struct AutoScrollingEditableTextView: NSViewRepresentable {
         textView.isAutomaticTextReplacementEnabled = false
         textView.allowsUndo = true
         textView.drawsBackground = false
-        textView.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let textFont = NSFont.systemFont(ofSize: fontSize, weight: .regular)
+        textView.font = textFont
+        textView.defaultParagraphStyle = Self.readingParagraphStyle
+        textView.typingAttributes = [
+            .font: textFont,
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: Self.readingParagraphStyle,
+        ]
         textView.textContainerInset = NSSize(width: 8, height: 10)
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
@@ -932,10 +1205,20 @@ private struct AutoScrollingEditableTextView: NSViewRepresentable {
             }
         }
 
-        let desiredFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let desiredFont = NSFont.systemFont(ofSize: fontSize, weight: .regular)
         if textView.font != desiredFont {
+            let fullTextRange = NSRange(location: 0, length: textView.string.utf16.count)
+            if fullTextRange.length > 0 {
+                textView.textStorage?.addAttribute(.font, value: desiredFont, range: fullTextRange)
+            }
             textView.font = desiredFont
         }
+        textView.defaultParagraphStyle = Self.readingParagraphStyle
+        textView.typingAttributes = [
+            .font: desiredFont,
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: Self.readingParagraphStyle,
+        ]
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -986,8 +1269,9 @@ private struct AutoScrollingEditableTextView: NSViewRepresentable {
             let attributedText = NSMutableAttributedString(
                 string: displayText,
                 attributes: [
-                    .font: NSFont.monospacedSystemFont(ofSize: parent.fontSize, weight: .regular),
+                    .font: NSFont.systemFont(ofSize: parent.fontSize, weight: .regular),
                     .foregroundColor: NSColor.labelColor,
+                    .paragraphStyle: AutoScrollingEditableTextView.readingParagraphStyle,
                 ]
             )
 
@@ -1043,31 +1327,49 @@ private struct ReadOnlyTextPanel: View {
     private let bottomAnchor = "read-only-bottom-anchor"
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 6) {
                     Text(text.isEmpty ? " " : text)
                         .foregroundColor(.primary)
-                        .font(.system(size: fontSize, design: .monospaced))
+                        .font(.system(size: fontSize))
+                        .lineSpacing(fontSize * 0.32)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
-                        .padding(12)
+
+                    if !cleanDraft.isEmpty {
+                        Text(cleanDraft)
+                            .foregroundStyle(.secondary)
+                            .font(.system(size: fontSize))
+                            .lineSpacing(fontSize * 0.32)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                            .accessibilityLabel(SL("Live draft"))
+                    }
 
                     Color.clear
                         .frame(height: 1)
                         .id(bottomAnchor)
                 }
-                .onAppear {
-                    scrollToBottom(using: proxy)
-                }
-                .onChange(of: text) { _ in
-                    scrollToBottom(using: proxy)
-                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 8)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            LiveDraftStrip(text: draftText, fontSize: fontSize)
+            .onAppear {
+                scrollToBottom(using: proxy)
+            }
+            .onChange(of: text) { _ in
+                scrollToBottom(using: proxy)
+            }
+            .onChange(of: draftText) { _ in
+                scrollToBottom(using: proxy)
+            }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
+    }
+
+    private var cleanDraft: String {
+        draftText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func scrollToBottom(using proxy: ScrollViewProxy) {
@@ -1082,50 +1384,78 @@ private struct ReadOnlyTextPanel: View {
 
 private struct EmptyPanelPlaceholder: View {
     let text: String
+    var isWorkspaceEmptyState = false
+    var animatesWaveform = false
 
+    @ViewBuilder
     var body: some View {
-        VStack {
-            Spacer(minLength: 0)
-            Text(SL(text))
-                .font(.system(.body, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(24)
-            Spacer(minLength: 0)
+        if isWorkspaceEmptyState {
+            HStack(spacing: 12) {
+                WaitingWaveform(isAnimating: animatesWaveform)
+
+                Text(SL(text))
+                    .font(.system(size: 16, weight: .regular))
+                    .lineSpacing(5)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+            }
+            .padding(.horizontal, 6)
+            .padding(.top, 10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            VStack {
+                Spacer(minLength: 0)
+                Text(SL(text))
+                    .font(.system(size: 16))
+                    .lineSpacing(5)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(24)
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
-private struct LiveDraftStrip: View {
-    let text: String
-    let fontSize: CGFloat
-
-    private var cleanText: String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
+private struct WaitingWaveform: View {
+    let isAnimating: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        if !cleanText.isEmpty {
-            ZStack(alignment: .leading) {
-                Rectangle()
-                    .fill(.ultraThinMaterial)
+        TimelineView(.animation(minimumInterval: 0.08, paused: !isAnimating)) { context in
+            let phase = reduceMotion ? 0 : context.date.timeIntervalSinceReferenceDate * 3.2
 
-                Text(cleanText)
-                    .font(.system(size: fontSize, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .truncationMode(.head)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12)
+            HStack(alignment: .center, spacing: 2) {
+                ForEach(0 ..< 7, id: \.self) { index in
+                    Capsule()
+                        .fill(Color.secondary.opacity(0.34))
+                        .frame(
+                            width: 2.5,
+                            height: barHeight(index: index, phase: phase)
+                        )
+                }
             }
-            .frame(height: max(42, fontSize * 2.55))
-            .overlay(alignment: .top) {
-                Divider().opacity(0.55)
-            }
-            .accessibilityLabel(SL("Live draft"))
-            .accessibilityValue(cleanText)
+            .frame(width: 30, height: 18)
         }
+        .accessibilityHidden(true)
+    }
+
+    private func barHeight(index: Int, phase: TimeInterval) -> CGFloat {
+        guard isAnimating, !reduceMotion else {
+            return 5 + CGFloat((index * 3) % 8)
+        }
+
+        let wave = abs(sin(phase + Double(index) * 0.72))
+        return 4 + CGFloat(wave) * 12
+    }
+}
+
+private struct DialogueEntryOffsetPreferenceKey: PreferenceKey {
+    static var defaultValue = [UUID: CGFloat]()
+
+    static func reduce(value: inout [UUID: CGFloat], nextValue: () -> [UUID: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
     }
 }
 
@@ -1134,63 +1464,215 @@ private struct DialogueHistoryPanel: View {
     let fontSize: CGFloat
     let speakerLabel: (Int) -> String
     let draftText: String
+    let draftTimestamp: Date?
+    let draftID: UUID?
+    @Binding var hoveredEntryID: UUID?
+    let panelKind: DialoguePanelKind
+    @Binding var scrollTarget: DialogueScrollTarget?
     @State private var scrollWorkItem: DispatchWorkItem?
+    @State private var isPointerInside = false
     private let bottomAnchor = "dialogue-bottom-anchor"
     private static let timestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "HH:mm:ss"
+        formatter.dateFormat = "HH:mm"
         return formatter
     }()
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 5) {
-                        ForEach(entries) { entry in
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                TimestampBadge(label: Self.timestampFormatter.string(from: entry.timestamp))
-
-                                if let speakerNumber = entry.speakerNumber {
-                                    SpeakerBadge(label: speakerLabel(speakerNumber))
-                                }
-
-                                Text(entry.text)
-                                    .font(.system(size: fontSize, design: .monospaced))
-                                    .foregroundStyle(entry.isDraft ? Color.secondary : Color.primary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .textSelection(.enabled)
-                            }
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 2)
-                        }
-
-                        Color.clear
-                            .frame(height: 1)
-                            .id(bottomAnchor)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(entries) { entry in
+                        dialogueBlock(
+                            entryID: entry.id,
+                            text: entry.text,
+                            timestamp: entry.timestamp,
+                            speakerNumber: entry.speakerNumber,
+                            isDraft: entry.isDraft
+                        )
+                        .id(entry.id)
                     }
-                    .padding(12)
-                }
-                .onAppear {
-                    scrollToBottom(using: proxy)
-                }
-                .onChange(of: scrollSignature) { _ in
-                    scrollToBottom(using: proxy)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            LiveDraftStrip(text: draftText, fontSize: fontSize)
+                    if !cleanDraft.isEmpty {
+                        dialogueBlock(
+                            entryID: draftID,
+                            text: cleanDraft,
+                            timestamp: draftTimestamp ?? Date(),
+                            speakerNumber: nil,
+                            isDraft: true
+                        )
+                        .accessibilityLabel(SL("Live draft"))
+                    }
+
+                    Color.clear
+                        .frame(height: 1)
+                        .id(bottomAnchor)
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 6)
+            }
+            .onAppear {
+                scrollToBottom(using: proxy)
+            }
+            .onChange(of: scrollSignature) { _ in
+                scrollToBottom(using: proxy)
+            }
+            .onChange(of: scrollTarget) { target in
+                scrollToSynchronizedTarget(target, using: proxy)
+            }
+            .onChange(of: availableEntryIDs) { _ in
+                scrollToSynchronizedTarget(scrollTarget, using: proxy)
+            }
+            .onPreferenceChange(DialogueEntryOffsetPreferenceKey.self) { offsets in
+                publishTopVisibleEntry(from: offsets)
+            }
         }
+        .coordinateSpace(name: coordinateSpaceName)
+        .onHover { isHovering in
+            isPointerInside = isHovering
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
+    }
+
+    private var coordinateSpaceName: String {
+        "speechara-dialogue-scroll-\(panelKind.rawValue)"
+    }
+
+    private var availableEntryIDs: [UUID] {
+        entries.map(\.id)
     }
 
     private var scrollSignature: String {
-        guard let lastEntry = entries.last else {
-            return "empty"
+        let entrySignature: String
+        if let lastEntry = entries.last {
+            entrySignature = "\(entries.count)-\(lastEntry.id.uuidString)-\(lastEntry.text.count)-\(lastEntry.isDraft)"
+        } else {
+            entrySignature = "empty"
         }
 
-        return "\(entries.count)-\(lastEntry.id.uuidString)-\(lastEntry.text.count)-\(lastEntry.isDraft)"
+        return "\(entrySignature)-\(cleanDraft)"
+    }
+
+    private var cleanDraft: String {
+        draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func dialogueBlock(
+        entryID: UUID?,
+        text: String,
+        timestamp: Date,
+        speakerNumber: Int?,
+        isDraft: Bool
+    ) -> some View {
+        inlineDialogueText(
+            text: text,
+            timestamp: timestamp,
+            speakerNumber: speakerNumber,
+            isDraft: isDraft
+        )
+        .lineSpacing(fontSize * 0.32)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .textSelection(.enabled)
+        .padding(.horizontal, 4)
+        .padding(.vertical, 3)
+        .background {
+            ZStack {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(isHighlighted(entryID) ? Color.accentColor.opacity(0.11) : Color.clear)
+
+                if let entryID {
+                    GeometryReader { geometry in
+                        Color.clear.preference(
+                            key: DialogueEntryOffsetPreferenceKey.self,
+                            value: [entryID: geometry.frame(in: .named(coordinateSpaceName)).minY]
+                        )
+                    }
+                }
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { isHovering in
+            updateHoveredEntry(entryID, isHovering: isHovering)
+        }
+        .animation(.easeOut(duration: 0.12), value: hoveredEntryID)
+    }
+
+    private func isHighlighted(_ entryID: UUID?) -> Bool {
+        guard let entryID else {
+            return false
+        }
+        return hoveredEntryID == entryID
+    }
+
+    private func updateHoveredEntry(_ entryID: UUID?, isHovering: Bool) {
+        guard let entryID else {
+            return
+        }
+
+        if isHovering {
+            hoveredEntryID = entryID
+        } else if hoveredEntryID == entryID {
+            hoveredEntryID = nil
+        }
+    }
+
+    private func publishTopVisibleEntry(from offsets: [UUID: CGFloat]) {
+        guard isPointerInside, !offsets.isEmpty else {
+            return
+        }
+
+        let topInset: CGFloat = 6
+        let entriesAboveTop = offsets.filter { $0.value <= topInset }
+        let visibleEntry = entriesAboveTop.max(by: { $0.value < $1.value })
+            ?? offsets.min(by: { $0.value < $1.value })
+
+        guard let entryID = visibleEntry?.key else {
+            return
+        }
+
+        let nextTarget = DialogueScrollTarget(entryID: entryID, source: panelKind)
+        guard scrollTarget != nextTarget else {
+            return
+        }
+        scrollTarget = nextTarget
+    }
+
+    private func scrollToSynchronizedTarget(
+        _ target: DialogueScrollTarget?,
+        using proxy: ScrollViewProxy
+    ) {
+        guard let target,
+              target.source != panelKind,
+              availableEntryIDs.contains(target.entryID) else {
+            return
+        }
+
+        proxy.scrollTo(target.entryID, anchor: .top)
+    }
+
+    private func inlineDialogueText(
+        text: String,
+        timestamp: Date,
+        speakerNumber: Int?,
+        isDraft: Bool
+    ) -> Text {
+        var prefix = Text(verbatim: "\(Self.timestampFormatter.string(from: timestamp)) ")
+            .font(.system(size: 11, weight: .medium, design: .rounded))
+            .foregroundColor(Color.secondary.opacity(0.55))
+
+        if let speakerNumber {
+            prefix = prefix
+                + Text(verbatim: "\(speakerLabel(speakerNumber)) · ")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundColor(.secondary)
+        }
+
+        return prefix
+            + Text(verbatim: text)
+                .font(.system(size: fontSize))
+                .foregroundColor(isDraft ? .secondary : .primary)
     }
 
     private func scrollToBottom(using proxy: ScrollViewProxy) {
@@ -1204,36 +1686,27 @@ private struct DialogueHistoryPanel: View {
 
 }
 
-private struct SpeakerBadge: View {
-    let label: String
+private struct LanguageCodeBadge: View {
+    let code: String
+    let languageName: String
 
     var body: some View {
-        Text(label)
-            .font(.system(size: 10, weight: .semibold, design: .rounded))
-            .fontWeight(.semibold)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
+        Text(code)
+            .font(.system(size: 10, weight: .bold, design: .rounded))
+            .tracking(0.5)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .foregroundStyle(Color.accentColor)
             .background(
-                Capsule()
-                    .fill(Color.primary.opacity(0.08))
+                Capsule(style: .continuous)
+                    .fill(Color.accentColor.opacity(0.10))
             )
-            .foregroundStyle(.secondary)
-    }
-}
-
-private struct TimestampBadge: View {
-    let label: String
-
-    var body: some View {
-        Text(label)
-            .font(.system(size: 10, weight: .medium, design: .monospaced))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(
-                Capsule()
-                    .fill(Color.secondary.opacity(0.10))
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(Color.accentColor.opacity(0.18), lineWidth: 1)
             )
-            .foregroundStyle(.secondary)
+            .help(SLF("Input: %@", languageName))
+            .accessibilityLabel(SLF("Input: %@", languageName))
     }
 }
 
@@ -1277,72 +1750,207 @@ private struct MicrophoneOffWarningBanner: View {
 }
 
 private struct FontSizeControls: View {
+    let currentSize: CGFloat
     let canDecrease: Bool
     let canIncrease: Bool
     let onDecrease: () -> Void
     let onIncrease: () -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 2) {
             Button(action: onDecrease) {
                 Image(systemName: "textformat.size.smaller")
                     .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 28, height: 24)
+                    .frame(width: 30, height: 28)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(FeedbackToolbarButtonStyle())
             .disabled(!canDecrease)
             .help(SL("Decrease text size"))
+
+            Text(verbatim: "\(Int(currentSize))")
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(minWidth: 22)
+                .accessibilityHidden(true)
 
             Button(action: onIncrease) {
                 Image(systemName: "textformat.size.larger")
                     .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 28, height: 24)
+                    .frame(width: 30, height: 28)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(FeedbackToolbarButtonStyle())
             .disabled(!canIncrease)
             .help(SL("Increase text size"))
         }
-        .foregroundStyle(.secondary)
+        .padding(2)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.primary.opacity(0.045))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityValue("\(Int(currentSize))")
     }
 }
 
-private struct PanelActionButton: View {
-    let title: String
-    let isEnabled: Bool
-    let action: () -> Void
-    let helpText: String
-    var accentColor: Color? = nil
+private struct FeedbackToolbarButtonStyle: ButtonStyle {
+    var isConfirmed = false
 
-    @ViewBuilder
-    var body: some View {
-        if let accentColor {
-            Button(SL(title), action: action)
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .tint(accentColor)
-                .disabled(!isEnabled)
-                .help(SL(helpText))
-        } else {
-            Button(SL(title), action: action)
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(!isEnabled)
-                .help(SL(helpText))
+    func makeBody(configuration: Configuration) -> some View {
+        FeedbackToolbarButton(
+            configuration: configuration,
+            isConfirmed: isConfirmed
+        )
+    }
+
+    private struct FeedbackToolbarButton: View {
+        @Environment(\.isEnabled) private var isEnabled
+
+        let configuration: Configuration
+        let isConfirmed: Bool
+
+        var body: some View {
+            configuration.label
+                .foregroundStyle(foregroundColor)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(backgroundColor)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(borderColor, lineWidth: 1)
+                )
+                .scaleEffect(configuration.isPressed ? 0.92 : 1)
+                .opacity(isEnabled ? 1 : 0.38)
+                .animation(.easeOut(duration: 0.10), value: configuration.isPressed)
+                .animation(.easeOut(duration: 0.14), value: isConfirmed)
+        }
+
+        private var foregroundColor: Color {
+            if isConfirmed {
+                return Color.green
+            }
+
+            return configuration.isPressed ? Color.accentColor : Color.secondary
+        }
+
+        private var backgroundColor: Color {
+            if isConfirmed {
+                return Color.green.opacity(0.16)
+            }
+
+            if configuration.isPressed {
+                return Color.accentColor.opacity(0.18)
+            }
+
+            return Color.primary.opacity(0.055)
+        }
+
+        private var borderColor: Color {
+            if isConfirmed {
+                return Color.green.opacity(0.42)
+            }
+
+            if configuration.isPressed {
+                return Color.accentColor.opacity(0.45)
+            }
+
+            return Color.primary.opacity(0.10)
         }
     }
 }
 
-private struct SummaryButton: View {
-    let title: String
-    let isEnabled: Bool
-    let action: () -> Void
+private struct AIActionBlock: View {
+    let suggestTitle: String
+    let canSuggest: Bool
+    let isSuggesting: Bool
+    let suggestAction: () -> Void
+    let summaryTitle: String
+    let canSummarize: Bool
+    let summaryAction: () -> Void
+    let canCreateMeetingNotes: Bool
+    let meetingNotesAction: () -> Void
+    var isCompact = false
+
+    private let primaryColor = Color(red: 0.22, green: 0.46, blue: 0.96)
+    private let aiColor = Color(red: 0.56, green: 0.35, blue: 0.88)
 
     var body: some View {
-        PanelActionButton(
-            title: title,
-            isEnabled: isEnabled,
-            action: action,
-            helpText: "Generate a summary for the text in this panel."
+        HStack(spacing: 7) {
+            if !isCompact {
+                Label("AI", systemImage: "sparkles")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(aiColor)
+                    .padding(.horizontal, 4)
+
+                Divider()
+                    .frame(height: 20)
+            }
+
+            Button(action: suggestAction) {
+                HStack(spacing: 6) {
+                    if isSuggesting {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .tint(.white)
+                    } else {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+
+                    Text(SL(suggestTitle))
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 11)
+                .frame(height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(primaryColor.opacity(canSuggest || isSuggesting ? 1 : 0.35))
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSuggest)
+            .help(SL("Primary AI action: draft a reply to the latest question."))
+
+            Menu {
+                Button(action: summaryAction) {
+                    Label(SL(summaryTitle), systemImage: "text.alignleft")
+                }
+                .disabled(!canSummarize)
+
+                Button(action: meetingNotesAction) {
+                    Label(SL("Meeting notes"), systemImage: "doc.text")
+                }
+                .disabled(!canCreateMeetingNotes)
+            } label: {
+                Text(SL("Summary"))
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.primary.opacity(0.07))
+                    )
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .disabled(!canSummarize && !canCreateMeetingNotes)
+            .help(SL("Secondary AI actions"))
+        }
+        .padding(5)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(aiColor.opacity(0.065))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .stroke(aiColor.opacity(0.12), lineWidth: 1)
         )
     }
 }
@@ -1352,16 +1960,18 @@ private struct ResultPanel: View {
     let contentText: String
     let errorMessage: String?
     let isLoading: Bool
+    let contentFontSize: CGFloat
     let copyAction: () -> Void
     let closeAction: () -> Void
     let loadingText: String
     let emptyText: String
+    var usesInternalScroll = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 Text(SL(title))
-                    .font(.headline)
+                    .font(.system(size: 15, weight: .semibold))
 
                 Spacer()
 
@@ -1377,16 +1987,25 @@ private struct ResultPanel: View {
                 .help(SL("Hide panel"))
             }
 
-            Group {
-                if isLoading {
-                    VStack(alignment: .leading, spacing: 10) {
-                        ProgressView()
-                        Text(SL(loadingText))
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .padding(12)
-                } else if let errorMessage {
+            Divider()
+                .opacity(0.65)
+
+            resultContent
+        }
+    }
+
+    @ViewBuilder
+    private var resultContent: some View {
+        if isLoading {
+            VStack(alignment: .leading, spacing: 10) {
+                ProgressView()
+                Text(SL(loadingText))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
+            .padding(12)
+        } else if let errorMessage {
+            if usesInternalScroll {
                     ScrollView {
                         Text(errorMessage)
                             .foregroundStyle(.red)
@@ -1394,25 +2013,34 @@ private struct ResultPanel: View {
                             .textSelection(.enabled)
                     }
                     .padding(12)
-                } else if contentText.isEmpty {
-                    EmptyPanelPlaceholder(text: emptyText)
-                } else {
+            } else {
+                Text(errorMessage)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(12)
+            }
+        } else if contentText.isEmpty {
+            EmptyPanelPlaceholder(text: emptyText)
+                .frame(minHeight: 120)
+        } else {
+            if usesInternalScroll {
                     ScrollView {
                         Text(contentText)
+                            .font(.system(size: contentFontSize))
+                            .lineSpacing(contentFontSize * 0.32)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
                     }
                     .padding(12)
-                }
+            } else {
+                Text(contentText)
+                    .font(.system(size: contentFontSize))
+                    .lineSpacing(contentFontSize * 0.32)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(12)
             }
-            .background(
-                RoundedRectangle(cornerRadius: 14)
-                    .fill(Color.secondary.opacity(0.05))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
-            )
         }
     }
 }
@@ -1448,16 +2076,8 @@ private struct SmartAssistantPanel: View {
                 }
             }
         }
-        .padding(16)
+        .padding(.vertical, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(
-            RoundedRectangle(cornerRadius: 18)
-                .fill(Color.orange.opacity(0.10))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18)
-                .stroke(Color.orange.opacity(0.18), lineWidth: 1)
-        )
     }
 }
 
@@ -1552,7 +2172,11 @@ private struct ToolbarSecondaryButton: View {
     let title: String
     let systemImage: String
     var isActive = false
+    var showsTitle = true
     let action: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var isHovered = false
 
     var body: some View {
         Button(action: action) {
@@ -1560,23 +2184,62 @@ private struct ToolbarSecondaryButton: View {
                 Image(systemName: systemImage)
                     .font(.system(size: 13, weight: .semibold))
 
-                Text(SL(title))
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                if showsTitle {
+                    Text(SL(title))
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .lineLimit(1)
+                }
             }
             .foregroundStyle(isActive ? Color.primary : Color.secondary)
-            .padding(.horizontal, 14)
+            .padding(.horizontal, showsTitle ? 14 : 0)
+            .frame(width: showsTitle ? nil : ToolbarMetrics.controlHeight)
             .frame(height: ToolbarMetrics.controlHeight)
             .background(
                 RoundedRectangle(cornerRadius: ToolbarMetrics.cornerRadius)
-                    .fill(isActive ? Color.black.opacity(0.08) : Color.white.opacity(0.58))
+                    .fill(backgroundColor)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: ToolbarMetrics.cornerRadius)
-                    .stroke(Color.black.opacity(isActive ? 0.10 : 0.06), lineWidth: 1)
+                    .stroke(borderColor, lineWidth: 1)
             )
-            .shadow(color: Color.black.opacity(0.04), radius: 10, x: 0, y: 4)
+            .shadow(color: shadowColor, radius: colorScheme == .dark ? 6 : 10, x: 0, y: 4)
         }
         .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .animation(.easeOut(duration: 0.14), value: isHovered)
+        .animation(.easeOut(duration: 0.14), value: isActive)
+        .help(SL(title))
+        .accessibilityLabel(SL(title))
+    }
+
+    private var backgroundColor: Color {
+        if colorScheme == .dark {
+            if isActive {
+                return Color.accentColor.opacity(isHovered ? 0.28 : 0.22)
+            }
+            return Color.white.opacity(isHovered ? 0.10 : 0.055)
+        }
+
+        if isActive {
+            return Color.accentColor.opacity(isHovered ? 0.16 : 0.11)
+        }
+        return Color.white.opacity(isHovered ? 0.78 : 0.60)
+    }
+
+    private var borderColor: Color {
+        if colorScheme == .dark {
+            return isActive
+                ? Color.accentColor.opacity(0.42)
+                : Color.white.opacity(isHovered ? 0.16 : 0.09)
+        }
+
+        return isActive
+            ? Color.accentColor.opacity(0.30)
+            : Color.black.opacity(isHovered ? 0.10 : 0.06)
+    }
+
+    private var shadowColor: Color {
+        colorScheme == .dark ? Color.black.opacity(0.24) : Color.black.opacity(0.04)
     }
 }
 
@@ -1605,28 +2268,42 @@ private struct PrimaryActionButton: View {
     let subtitle: String?
     let systemImage: String
     let tint: Color
+    var audioLevel: Double?
+    var isAudioLevelActive = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 12) {
+            HStack(spacing: 9) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 17, weight: .bold))
+                    .font(.system(size: 15, weight: .bold))
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(SL(title))
-                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                        .allowsTightening(true)
+                        .truncationMode(.tail)
 
                     if let subtitle {
                         Text(SL(subtitle))
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .font(.system(size: 10, weight: .semibold, design: .rounded))
                             .foregroundStyle(.white.opacity(0.82))
                     }
                 }
                 .multilineTextAlignment(.leading)
+                .layoutPriority(1)
+
+                if let audioLevel {
+                    AudioLevelBars(
+                        level: audioLevel,
+                        isActive: isAudioLevelActive
+                    )
+                }
             }
             .foregroundStyle(.white)
-            .padding(.horizontal, 24)
+            .padding(.horizontal, 18)
             .frame(height: ToolbarMetrics.primaryHeight)
             .background(
                 RoundedRectangle(cornerRadius: ToolbarMetrics.primaryCornerRadius)
@@ -1646,12 +2323,21 @@ private struct PrimaryActionButton: View {
 
 private struct SurfaceCard<Content: View>: View {
     let accent: Color?
+    let contentPadding: CGFloat
+    let isElevated: Bool
     let content: Content
 
     @Environment(\.colorScheme) private var colorScheme
 
-    init(accent: Color? = nil, @ViewBuilder content: () -> Content) {
+    init(
+        accent: Color? = nil,
+        contentPadding: CGFloat = 20,
+        isElevated: Bool = true,
+        @ViewBuilder content: () -> Content
+    ) {
         self.accent = accent
+        self.contentPadding = contentPadding
+        self.isElevated = isElevated
         self.content = content()
     }
 
@@ -1659,7 +2345,7 @@ private struct SurfaceCard<Content: View>: View {
         VStack(alignment: .leading, spacing: 0) {
             content
         }
-        .padding(20)
+        .padding(contentPadding)
         .background(
             RoundedRectangle(cornerRadius: 24)
                 .fill(backgroundColor)
@@ -1668,7 +2354,12 @@ private struct SurfaceCard<Content: View>: View {
             RoundedRectangle(cornerRadius: 24)
                 .stroke(borderColor, lineWidth: 1)
         )
-        .shadow(color: shadowColor, radius: 18, x: 0, y: 10)
+        .shadow(
+            color: isElevated ? shadowColor : .clear,
+            radius: isElevated ? 18 : 0,
+            x: 0,
+            y: isElevated ? 10 : 0
+        )
         .overlay(alignment: .topLeading) {
             if let accent {
                 RoundedRectangle(cornerRadius: 24)
@@ -1700,8 +2391,8 @@ private struct SurfaceCard<Content: View>: View {
 }
 
 private enum ToolbarMetrics {
-    static let primaryHeight: CGFloat = 54
-    static let primaryCornerRadius: CGFloat = 20
+    static let primaryHeight: CGFloat = 46
+    static let primaryCornerRadius: CGFloat = 16
     static let controlHeight: CGFloat = 46
     static let cornerRadius: CGFloat = 16
     static let badgeHeight: CGFloat = 32
@@ -1724,7 +2415,7 @@ private struct MicrophoneControl: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
 
-                MicrophoneLevelBars(
+                AudioLevelBars(
                     level: viewModel.microphoneLevel,
                     isActive: viewModel.isMicrophoneListening || viewModel.isMicrophoneTesting
                 )
@@ -1787,7 +2478,7 @@ private struct MicrophoneControl: View {
     }
 }
 
-private struct MicrophoneLevelBars: View {
+private struct AudioLevelBars: View {
     let level: Double
     let isActive: Bool
 
@@ -1871,7 +2562,7 @@ private struct ListeningSetupSheet: View {
                                 iconName: "ear.fill",
                                 accentColor: Color(red: 0.16, green: 0.42, blue: 0.87),
                                 title: "Listening language",
-                                subtitle: "Speechara will transcribe the session using this source language."
+                                subtitle: "Choose a language or let Speechara detect it automatically."
                             ) {
                                 Picker("", selection: $viewModel.selectedSourceLanguage) {
                                     ForEach(SourceLanguageOption.allCases) { language in
@@ -1880,7 +2571,7 @@ private struct ListeningSetupSheet: View {
                                 }
                                 .labelsHidden()
                                 .pickerStyle(.menu)
-                                .frame(width: 140)
+                                .frame(width: 230)
                             }
 
                             ListeningSetupCard(
@@ -1956,7 +2647,7 @@ private struct ListeningSetupSheet: View {
                                 }
                                     .labelsHidden()
                                     .pickerStyle(.menu)
-                                    .frame(width: 140)
+                                    .frame(width: 230)
                                     .disabled(!viewModel.isTranslationEnabled)
                                     .opacity(viewModel.isTranslationEnabled ? 1 : 0.45)
                                 }

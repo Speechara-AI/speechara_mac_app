@@ -1,10 +1,16 @@
 import AppKit
 import SwiftUI
 
-private enum SpeecharaAppSection: String, CaseIterable, Identifiable {
+private enum SpeecharaAppSection: String, Identifiable {
     case workspace
     case profile
     case history
+
+    static let sidebarOrder: [SpeecharaAppSection] = [
+        .workspace,
+        .history,
+        .profile,
+    ]
 
     var id: String { rawValue }
 
@@ -107,26 +113,51 @@ struct SpeecharaWorkspaceShellView: View {
     @EnvironmentObject private var authStore: AuthSessionStore
     @ObservedObject private var updateController = SpeecharaUpdateController.shared
     @AppStorage("speechara.focusModeEnabled") private var isFocusModeEnabled = false
+    @AppStorage("speechara.sidebarCollapsed") private var isSidebarCollapsed = true
     @State private var selectedSection: SpeecharaAppSection = .workspace
+    @State private var isSidebarManuallyHidden = false
+    @State private var isSidebarRevealHandleHovered = false
 
     var body: some View {
-        HStack(spacing: 0) {
-            if !isSidebarHiddenForFocusMode {
-                sidebar
+        ZStack(alignment: .leading) {
+            HStack(spacing: 0) {
+                if !isSidebarHidden {
+                    sidebar
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                }
+
+                ZStack {
+                    shellBackground
+                        .ignoresSafeArea()
+
+                    currentSection
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            if isSidebarHidden {
+                sidebarRevealHandle
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
-
-            ZStack {
-                shellBackground
-                    .ignoresSafeArea()
-
-                currentSection
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(shellBackground.ignoresSafeArea())
-        .animation(.easeInOut(duration: 0.22), value: isSidebarHiddenForFocusMode)
-        .frame(minWidth: 1320, minHeight: 820)
+        .animation(.easeInOut(duration: 0.22), value: isSidebarHidden)
+        .animation(.easeInOut(duration: 0.20), value: isSidebarCollapsed)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                SpeecharaSidebarVisibilityButton(
+                    isSidebarHidden: isSidebarHidden,
+                    action: toggleSidebarVisibility
+                )
+            }
+        }
+        // Individual sections define the width they actually need. Keeping the
+        // shell itself compact lets the workspace shrink further in rows mode.
+        .frame(minWidth: 760, minHeight: 820)
+    }
+
+    private var isSidebarHidden: Bool {
+        isSidebarManuallyHidden || isSidebarHiddenForFocusMode
     }
 
     private var isSidebarHiddenForFocusMode: Bool {
@@ -156,15 +187,16 @@ struct SpeecharaWorkspaceShellView: View {
     }
 
     private var sidebar: some View {
-        VStack(spacing: 22) {
+        VStack(spacing: isSidebarCollapsed ? 14 : 22) {
             appMark
 
-            VStack(spacing: 12) {
-                ForEach(SpeecharaAppSection.allCases) { section in
+            VStack(spacing: isSidebarCollapsed ? 8 : 12) {
+                ForEach(SpeecharaAppSection.sidebarOrder) { section in
                     SpeecharaSidebarButton(
                         title: section.title,
                         systemImage: section.systemImage,
-                        isSelected: selectedSection == section
+                        isSelected: selectedSection == section,
+                        isCompact: isSidebarCollapsed
                     ) {
                         selectedSection = section
                     }
@@ -173,7 +205,8 @@ struct SpeecharaWorkspaceShellView: View {
                 SpeecharaSidebarButton(
                     title: SL("Settings"),
                     systemImage: "gearshape",
-                    isSelected: false
+                    isSelected: false,
+                    isCompact: isSidebarCollapsed
                 ) {
                     openSettingsWindow()
                 }
@@ -183,10 +216,10 @@ struct SpeecharaWorkspaceShellView: View {
 
 #if !APP_STORE
             if updateController.isUpdateAvailable {
-                SpeecharaSidebarUpdateButton {
+                SpeecharaSidebarUpdateButton(isCompact: isSidebarCollapsed) {
                     updateController.checkForUpdates()
                 }
-                .padding(.horizontal, 10)
+                .padding(.horizontal, isSidebarCollapsed ? 2 : 10)
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
 #endif
@@ -195,18 +228,19 @@ struct SpeecharaWorkspaceShellView: View {
                 VStack(spacing: 10) {
                     SpeecharaSidebarAvatar(
                         initials: user.initials,
-                        avatarURL: user.avatarURL
+                        avatarURL: user.avatarURL,
+                        isCompact: isSidebarCollapsed
                     )
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 14)
+                .padding(.horizontal, isSidebarCollapsed ? 2 : 10)
+                .padding(.vertical, isSidebarCollapsed ? 5 : 14)
                 .background(
-                    RoundedRectangle(cornerRadius: 28)
+                    RoundedRectangle(cornerRadius: isSidebarCollapsed ? 18 : 28)
                         .fill(SpeecharaShellTheme.sidebarPanelFill)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 28)
+                    RoundedRectangle(cornerRadius: isSidebarCollapsed ? 18 : 28)
                         .stroke(SpeecharaShellTheme.sidebarPanelBorder, lineWidth: 1)
                 )
                 .contentShape(RoundedRectangle(cornerRadius: 28))
@@ -216,10 +250,12 @@ struct SpeecharaWorkspaceShellView: View {
                     }
                 }
             }
+
+            sidebarCollapseButton
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 18)
-        .frame(width: 138)
+        .padding(.horizontal, isSidebarCollapsed ? 6 : 14)
+        .padding(.vertical, isSidebarCollapsed ? 14 : 18)
+        .frame(width: isSidebarCollapsed ? 64 : 138)
         .background(sidebarBackground)
         .overlay(alignment: .trailing) {
             Rectangle()
@@ -228,17 +264,97 @@ struct SpeecharaWorkspaceShellView: View {
         }
     }
 
+    private var sidebarRevealHandle: some View {
+        Button(action: revealSidebar) {
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(
+                        isSidebarRevealHandleHovered
+                            ? SpeecharaShellTheme.selectedButtonFill
+                            : SpeecharaShellTheme.sidebarPanelFill
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(
+                                isSidebarRevealHandleHovered
+                                    ? SpeecharaShellTheme.selectedButtonBorder
+                                    : SpeecharaShellTheme.sidebarPanelBorder,
+                                lineWidth: 1
+                            )
+                    )
+                    .frame(width: 24, height: 68)
+                    .offset(x: -8)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(
+                        isSidebarRevealHandleHovered
+                            ? SpeecharaShellTheme.selectedButtonIcon
+                            : SpeecharaShellTheme.buttonIcon
+                    )
+                    .frame(width: 16, height: 68)
+            }
+                .frame(width: 16, height: 68, alignment: .leading)
+                .clipped()
+                .shadow(
+                    color: Color.black.opacity(isSidebarRevealHandleHovered ? 0.17 : 0.10),
+                    radius: isSidebarRevealHandleHovered ? 11 : 8,
+                    x: 2,
+                    y: 0
+                )
+                .frame(width: 24, height: 72, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered in
+            isSidebarRevealHandleHovered = isHovered
+        }
+        .animation(.easeOut(duration: 0.14), value: isSidebarRevealHandleHovered)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 4)
+                .onEnded { value in
+                    if value.translation.width > 12 {
+                        revealSidebar()
+                    }
+                }
+        )
+        .help(SL("Show sidebar"))
+        .accessibilityLabel(SL("Show sidebar"))
+    }
+
     private var appMark: some View {
         Image(nsImage: NSApp.applicationIconImage)
             .resizable()
             .interpolation(.high)
             .scaledToFit()
-            .frame(width: 58, height: 58)
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .shadow(color: Color.black.opacity(0.12), radius: 14, x: 0, y: 8)
+            .frame(width: isSidebarCollapsed ? 40 : 58, height: isSidebarCollapsed ? 40 : 58)
+            .clipShape(RoundedRectangle(cornerRadius: isSidebarCollapsed ? 12 : 18, style: .continuous))
+            .shadow(color: Color.black.opacity(0.12), radius: isSidebarCollapsed ? 8 : 14, x: 0, y: 6)
         .frame(maxWidth: .infinity)
-        .padding(.top, 4)
-        .padding(.bottom, 8)
+        .padding(.top, isSidebarCollapsed ? 0 : 4)
+        .padding(.bottom, isSidebarCollapsed ? 4 : 8)
+    }
+
+    private var sidebarCollapseButton: some View {
+        Button {
+            isSidebarCollapsed.toggle()
+        } label: {
+            Image(systemName: isSidebarCollapsed ? "chevron.right" : "chevron.left")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(SpeecharaShellTheme.buttonIcon)
+                .frame(width: 32, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(SpeecharaShellTheme.buttonFill)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(SpeecharaShellTheme.buttonBorder, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(SL(isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"))
+        .accessibilityLabel(SL(isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"))
     }
 
     @ViewBuilder
@@ -257,34 +373,81 @@ struct SpeecharaWorkspaceShellView: View {
         openWindow(id: "speechara-settings")
         NSApp.activate(ignoringOtherApps: true)
     }
+
+    private func toggleSidebarVisibility() {
+        if isSidebarHidden {
+            revealSidebar()
+        } else {
+            isSidebarManuallyHidden = true
+        }
+    }
+
+    private func revealSidebar() {
+        isSidebarManuallyHidden = false
+
+        if isSidebarHiddenForFocusMode {
+            isFocusModeEnabled = false
+        }
+    }
+}
+
+private struct SpeecharaSidebarVisibilityButton: View {
+    let isSidebarHidden: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "sidebar.left")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(SpeecharaShellTheme.buttonIcon)
+                .frame(width: 28, height: 24)
+                .overlay(alignment: .topTrailing) {
+                    if isSidebarHidden {
+                        Circle()
+                            .fill(Color(red: 0.96, green: 0.55, blue: 0.14))
+                            .frame(width: 6, height: 6)
+                            .overlay(
+                                Circle()
+                                    .stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.5)
+                            )
+                            .offset(x: -2, y: 1)
+                    }
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(SL(isSidebarHidden ? "Show sidebar" : "Hide sidebar"))
+        .accessibilityLabel(SL(isSidebarHidden ? "Show sidebar" : "Hide sidebar"))
+    }
 }
 
 private struct SpeecharaSidebarButton: View {
     let title: String
     let systemImage: String
     let isSelected: Bool
+    let isCompact: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 10) {
+            VStack(spacing: isCompact ? 0 : 10) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 16)
+                    RoundedRectangle(cornerRadius: isCompact ? 13 : 16)
                         .fill(
                             isSelected
                                 ? SpeecharaShellTheme.selectedButtonFill
                                 : SpeecharaShellTheme.buttonFill
                         )
-                        .frame(width: 54, height: 54)
+                        .frame(width: isCompact ? 42 : 54, height: isCompact ? 42 : 54)
 
-                    RoundedRectangle(cornerRadius: 16)
+                    RoundedRectangle(cornerRadius: isCompact ? 13 : 16)
                         .stroke(
                             isSelected
                                 ? SpeecharaShellTheme.selectedButtonBorder
                                 : SpeecharaShellTheme.buttonBorder,
                             lineWidth: 1
                         )
-                        .frame(width: 54, height: 54)
+                        .frame(width: isCompact ? 42 : 54, height: isCompact ? 42 : 54)
 
                     Image(systemName: systemImage)
                         .font(.system(size: 18, weight: .semibold))
@@ -295,45 +458,52 @@ private struct SpeecharaSidebarButton: View {
                         )
                 }
 
-                Text(title)
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                    .foregroundStyle(
-                        isSelected
-                            ? SpeecharaShellTheme.selectedButtonText
-                            : SpeecharaShellTheme.buttonText
-                    )
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
+                if !isCompact {
+                    Text(title)
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundStyle(
+                            isSelected
+                                ? SpeecharaShellTheme.selectedButtonText
+                                : SpeecharaShellTheme.buttonText
+                        )
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                }
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
+            .padding(.vertical, isCompact ? 2 : 12)
         }
         .buttonStyle(.plain)
+        .help(title)
+        .accessibilityLabel(title)
     }
 }
 
 private struct SpeecharaSidebarUpdateButton: View {
+    let isCompact: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
+            HStack(spacing: isCompact ? 0 : 6) {
                 Image(systemName: "arrow.down.circle.fill")
                     .font(.system(size: 13, weight: .bold))
 
-                Text(SL("Update"))
-                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .lineLimit(1)
+                if !isCompact {
+                    Text(SL("Update"))
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .lineLimit(1)
+                }
             }
             .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)
-            .frame(height: 34)
+            .frame(maxWidth: isCompact ? nil : .infinity)
+            .frame(width: isCompact ? 38 : nil, height: isCompact ? 38 : 34)
             .background(
-                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                RoundedRectangle(cornerRadius: isCompact ? 12 : 15, style: .continuous)
                     .fill(Color(red: 0.10, green: 0.42, blue: 0.84))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                RoundedRectangle(cornerRadius: isCompact ? 12 : 15, style: .continuous)
                     .stroke(Color.white.opacity(0.22), lineWidth: 1)
             )
             .shadow(color: Color(red: 0.10, green: 0.42, blue: 0.84).opacity(0.22), radius: 10, x: 0, y: 5)
@@ -346,6 +516,7 @@ private struct SpeecharaSidebarUpdateButton: View {
 private struct SpeecharaSidebarAvatar: View {
     let initials: String
     let avatarURL: String?
+    let isCompact: Bool
 
     private var resolvedAvatarURL: URL? {
         guard let avatarURL = avatarURL?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -360,7 +531,7 @@ private struct SpeecharaSidebarAvatar: View {
         ZStack {
             Circle()
                 .fill(SpeecharaShellTheme.avatarSurface)
-                .frame(width: 62, height: 62)
+                .frame(width: isCompact ? 40 : 62, height: isCompact ? 40 : 62)
 
             if let resolvedAvatarURL {
                 AsyncImage(url: resolvedAvatarURL) { phase in
@@ -373,7 +544,7 @@ private struct SpeecharaSidebarAvatar: View {
                         fallback
                     }
                 }
-                .frame(width: 54, height: 54)
+                .frame(width: isCompact ? 34 : 54, height: isCompact ? 34 : 54)
                 .clipShape(Circle())
             } else {
                 fallback
@@ -387,9 +558,9 @@ private struct SpeecharaSidebarAvatar: View {
 
     private var fallback: some View {
         Text(initials.isEmpty ? "?" : initials)
-            .font(.system(size: 18, weight: .bold, design: .rounded))
+            .font(.system(size: isCompact ? 12 : 18, weight: .bold, design: .rounded))
             .foregroundStyle(.white)
-            .frame(width: 54, height: 54)
+            .frame(width: isCompact ? 34 : 54, height: isCompact ? 34 : 54)
             .background(
                 LinearGradient(
                     colors: [

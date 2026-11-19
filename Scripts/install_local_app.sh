@@ -5,6 +5,11 @@ if [ "${CONFIGURATION:-}" != "Debug" ]; then
   exit 0
 fi
 
+if [ "${SPEECHARA_INSTALL_LOCAL_APP:-0}" != "1" ]; then
+  echo "Skipping local app install. Set SPEECHARA_INSTALL_LOCAL_APP=1 to copy Debug builds to ~/Applications."
+  exit 0
+fi
+
 if [ -z "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
   echo "Skipping local app install because no code signing identity is available."
   exit 0

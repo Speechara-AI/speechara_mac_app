@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import UniformTypeIdentifiers
 
 enum SubtitleStatus: String {
     case idle = "Idle"
@@ -46,181 +47,6 @@ private enum ListeningMicrophonePrompt {
 
         NSApp.activate(ignoringOtherApps: true)
         return alert.runModal() == .alertFirstButtonReturn
-    }
-}
-
-enum SourceLanguageOption: String, CaseIterable, Identifiable {
-    case english
-    case russian
-    case german
-    case spanish
-    case french
-
-    var id: Self { self }
-
-    var displayName: String {
-        SpeecharaLocalizationStore.shared.localizedLanguageName(for: matchingAppLanguage)
-    }
-
-    var deepgramLanguageCode: String {
-        switch self {
-        case .english:
-            return "en"
-        case .russian:
-            return "ru"
-        case .german:
-            return "de"
-        case .spanish:
-            return "es"
-        case .french:
-            return "fr"
-        }
-    }
-
-    var deepSeekLanguageName: String {
-        switch self {
-        case .english:
-            return "English"
-        case .russian:
-            return "Russian"
-        case .german:
-            return "German"
-        case .spanish:
-            return "Spanish"
-        case .french:
-            return "French"
-        }
-    }
-
-    var summarizeButtonTitle: String {
-        SL("Summarize")
-    }
-
-    var answerButtonTitle: String {
-        SL("Suggest answer")
-    }
-
-    var protocolButtonTitle: String {
-        SL("Protocol")
-    }
-
-    var answerPanelTitle: String {
-        SL("Suggested answer")
-    }
-
-    var protocolPanelTitle: String {
-        SL("Meeting protocol")
-    }
-
-    private var matchingAppLanguage: SpeecharaAppLanguage {
-        switch self {
-        case .english:
-            return .english
-        case .russian:
-            return .russian
-        case .german:
-            return .german
-        case .spanish:
-            return .spanish
-        case .french:
-            return .french
-        }
-    }
-}
-
-enum TranslationLanguageOption: String, CaseIterable, Identifiable {
-    case english
-    case russian
-    case german
-    case spanish
-    case french
-
-    var id: Self { self }
-
-    var displayName: String {
-        SpeecharaLocalizationStore.shared.localizedLanguageName(for: matchingAppLanguage)
-    }
-
-    var languageCode: String {
-        switch self {
-        case .english:
-            return "en"
-        case .russian:
-            return "ru"
-        case .german:
-            return "de"
-        case .spanish:
-            return "es"
-        case .french:
-            return "fr"
-        }
-    }
-
-    var deepSeekTargetLanguageName: String {
-        switch self {
-        case .english:
-            return "English"
-        case .russian:
-            return "Russian"
-        case .german:
-            return "German"
-        case .spanish:
-            return "Spanish"
-        case .french:
-            return "French"
-        }
-    }
-
-    var summarizeButtonTitle: String {
-        SL("Summarize")
-    }
-
-    var answerButtonTitle: String {
-        SL("Suggest answer")
-    }
-
-    var protocolButtonTitle: String {
-        SL("Protocol")
-    }
-
-    var answerPanelTitle: String {
-        SL("Suggested answer")
-    }
-
-    var protocolPanelTitle: String {
-        SL("Meeting protocol")
-    }
-
-    private var matchingAppLanguage: SpeecharaAppLanguage {
-        switch self {
-        case .english:
-            return .english
-        case .russian:
-            return .russian
-        case .german:
-            return .german
-        case .spanish:
-            return .spanish
-        case .french:
-            return .french
-        }
-    }
-}
-
-extension SourceLanguageOption {
-    var matchingTranslationLanguage: TranslationLanguageOption {
-        switch self {
-        case .english:
-            return .english
-        case .russian:
-            return .russian
-        case .german:
-            return .german
-        case .spanish:
-            return .spanish
-        case .french:
-            return .french
-        }
     }
 }
 
@@ -274,27 +100,6 @@ private struct SessionTurn: Identifiable, Equatable {
     }
 }
 
-private struct SessionDraft: Codable {
-    struct DraftTurn: Codable {
-        let id: UUID
-        let speakerLabel: String?
-        let text: String
-        let translationSpeakerLabel: String?
-        let translationText: String
-        let timestamp: Date
-        let isClosed: Bool
-    }
-
-    let turns: [DraftTurn]
-    let subtitlesText: String
-    let translatedText: String
-    let transcriptSummaryText: String
-    let translationSummaryText: String
-    let transcriptProtocolText: String
-    let translationProtocolText: String
-    let transcriptAnswerText: String
-    let translationAnswerText: String
-}
 
 @MainActor
 final class SubtitleViewModel: ObservableObject {
@@ -302,11 +107,15 @@ final class SubtitleViewModel: ObservableObject {
     private static let maximumEditorFontSize: CGFloat = 30
     private static let editorFontStep: CGFloat = 2
     private static let microphoneStartPreferenceDefaultsKey = "speechara.session.startWithMicrophone"
+    private static let sourceLanguageDefaultsKey = "speechara.session.inputLanguage"
+    private static let translationLanguageDefaultsKey = "speechara.session.translationLanguage"
     private static let sessionDraftDefaultsKey = "speechara.session.localDraft.v2"
-    private static let autosaveIntervalNanoseconds: UInt64 = 240_000_000
     private static let stableReconstructionContextLines = 2
     private static let stableReconstructionBatchLines = 5
     private static let stableReconstructionDelayNanoseconds: UInt64 = 2_000_000_000
+    private static let utterancePauseNanoseconds: UInt64 = 2_200_000_000
+    private static let maximumUtteranceCharacterCount = 520
+    private static let maximumUtteranceWordCount = 90
 
     @Published private(set) var status: SubtitleStatus = .idle
     @Published var subtitlesText = ""
@@ -315,12 +124,17 @@ final class SubtitleViewModel: ObservableObject {
     @Published private(set) var translationEntries = [DialogueEntry]()
     @Published var selectedSourceLanguage: SourceLanguageOption = .english {
         didSet {
+            defaults.set(selectedSourceLanguage.rawValue, forKey: Self.sourceLanguageDefaultsKey)
             reconcileTranslationSelectionWithSourceLanguage()
         }
     }
     @Published var isAudioRecordingEnabled = false
     @Published var isTranslationEnabled = true
-    @Published var selectedTranslationLanguage: TranslationLanguageOption = .russian
+    @Published var selectedTranslationLanguage: TranslationLanguageOption = .russian {
+        didSet {
+            defaults.set(selectedTranslationLanguage.rawValue, forKey: Self.translationLanguageDefaultsKey)
+        }
+    }
     @Published var startsWithMicrophoneEnabled = false {
         didSet {
             defaults.set(
@@ -338,14 +152,16 @@ final class SubtitleViewModel: ObservableObject {
     @Published private(set) var shouldShowMicrophoneOffWarning = false
     @Published private(set) var isMicrophoneTesting = false
     @Published private(set) var isMicrophoneBusy = false
+    @Published private(set) var systemAudioLevel = 0.0
+    @Published private(set) var systemAudioSignalDetected = false
     @Published private(set) var microphoneLevel = 0.0
     @Published private(set) var microphoneSignalDetected = false
     @Published private(set) var isBusy = false
     @Published private(set) var errorMessage: String?
     @Published private(set) var translationMessage: String?
     @Published private(set) var lastRecordingPath: String?
-    @Published private(set) var transcriptFontSize: CGFloat = 18
-    @Published private(set) var translationFontSize: CGFloat = 18
+    @Published private(set) var transcriptFontSize: CGFloat = 17
+    @Published private(set) var translationFontSize: CGFloat = 17
     @Published private(set) var isTranscriptSummaryVisible = false
     @Published private(set) var isTranscriptSummaryLoading = false
     @Published private(set) var transcriptSummaryText = ""
@@ -395,15 +211,20 @@ final class SubtitleViewModel: ObservableObject {
     private var lastDeepgramFinalTranscript = ""
     private var nextStableTurnIndex = 0
     private var stableReconstructionTask: Task<Void, Never>?
+    private var utteranceFinalizationTask: Task<Void, Never>?
     private var translationPreparationTask: Task<Void, Never>?
     private var streamingSessionGeneration = UUID()
-    private var draftAutosaveTask: Task<Void, Never>?
     private var pendingTranslationDrafts = [UUID: String]()
     private var translationPreviewTurnID: UUID?
     private var lastSavedDraftFingerprint = ""
     private var meetingHistorySessionID: String?
     private var meetingHistorySessionRevision: Int?
     private var meetingHistoryStartedAt: Date?
+    private var meetingHistoryEndedAt: Date?
+    private var meetingHistoryAuthUserID: String?
+    private var meetingHistoryNeedsLegacyRecovery = false
+    private var meetingHistoryAutosaveTask: Task<Void, Never>?
+    private var meetingHistoryRetryTask: Task<Void, Never>?
     private var meetingHistoryLastSavedSnapshotSignature: String?
     private var meetingHistoryLastCompletedSnapshotSignature: String?
     private var meetingHistorySaveTask: Task<Void, Never>?
@@ -415,6 +236,7 @@ final class SubtitleViewModel: ObservableObject {
     private var billingUsageSyncTask: Task<Void, Never>?
     private var isReconcilingTranslationSelection = false
     private var isHandlingLiveTranscriptionRuntimeError = false
+    private var lastSystemAudioSignalDate: Date?
 
     private static let transcriptTimestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -432,6 +254,13 @@ final class SubtitleViewModel: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        selectedSourceLanguage = SourceLanguageOption.supported(
+            code: defaults.string(forKey: Self.sourceLanguageDefaultsKey)
+        ) ?? .english
+        selectedTranslationLanguage = TranslationLanguageOption.supported(
+            code: defaults.string(forKey: Self.translationLanguageDefaultsKey)
+        ) ?? .russian
+        reconcileTranslationSelectionWithSourceLanguage()
         startsWithMicrophoneEnabled = defaults.object(forKey: Self.microphoneStartPreferenceDefaultsKey) as? Bool ?? false
         refreshAvailableMicrophones()
         restoreDraftIfAvailable()
@@ -514,9 +343,17 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     var availableTranslationLanguages: [TranslationLanguageOption] {
-        TranslationLanguageOption.allCases.filter { language in
-            language != selectedSourceLanguage.matchingTranslationLanguage
+        guard let sourceTarget = selectedSourceLanguage.matchingTranslationLanguage else {
+            return TranslationLanguageOption.allCases
         }
+        return TranslationLanguageOption.allCases.filter { $0 != sourceTarget }
+    }
+
+    private var sourceAIOutputLanguage: TranslationLanguageOption {
+        if selectedSourceLanguage == .multilingual {
+            return isTranslationEnabled ? selectedTranslationLanguage : .english
+        }
+        return selectedSourceLanguage.matchingTranslationLanguage ?? .english
     }
 
     var translationPanelTitle: String {
@@ -525,7 +362,7 @@ final class SubtitleViewModel: ObservableObject {
 
     var assistantActivityText: String? {
         if isTranscriptProtocolLoading || isTranslationProtocolLoading {
-            return SL("Preparing protocol...")
+            return SL("Preparing meeting notes...")
         }
 
         if isTranscriptAnswerLoading || isTranslationAnswerLoading {
@@ -545,8 +382,8 @@ final class SubtitleViewModel: ObservableObject {
 
     var transcriptPlaceholderText: String {
         hasActiveSession
-            ? SL("Transcript is live. You can edit it at any time during testing.")
-            : SL("Start listening or turn on the microphone to begin capturing transcript.")
+            ? SL("Listening… Transcript will appear here.")
+            : SL("Start listening to see the transcript here.")
     }
 
     var translationPlaceholderText: String {
@@ -554,7 +391,7 @@ final class SubtitleViewModel: ObservableObject {
             return SL("Translation is off for this session.")
         }
 
-        return SL("Translation will appear here as final transcript chunks arrive.")
+        return SL("Translation will appear as you speak.")
     }
 
     var sourceAnswerPlaceholderText: String {
@@ -586,7 +423,7 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     var sourceSummaryPanelTitle: String {
-        SL("Summary")
+        "\(SL("Summary")) · \(selectedSourceLanguage.displayName)"
     }
 
     var sourceProtocolPanelTitle: String {
@@ -598,7 +435,7 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     var translationSummaryPanelTitle: String {
-        SL("Summary")
+        "\(SL("Summary")) · \(selectedTranslationLanguage.displayName)"
     }
 
     var translationAnswerPanelTitle: String {
@@ -614,7 +451,8 @@ final class SubtitleViewModel: ObservableObject {
             return
         }
 
-        guard selectedTranslationLanguage == selectedSourceLanguage.matchingTranslationLanguage else {
+        guard let matchingTranslationLanguage = selectedSourceLanguage.matchingTranslationLanguage,
+              selectedTranslationLanguage == matchingTranslationLanguage else {
             return
         }
 
@@ -652,6 +490,14 @@ final class SubtitleViewModel: ObservableObject {
         speakerLabel(for: speakerNumber)
     }
 
+    var liveUtteranceTimestamp: Date? {
+        sessionTurns.last(where: { !$0.isClosed })?.timestamp
+    }
+
+    var liveUtteranceID: UUID? {
+        sessionTurns.last(where: { !$0.isClosed })?.id
+    }
+
     var canIncreaseTranscriptFontSize: Bool {
         transcriptFontSize < Self.maximumEditorFontSize
     }
@@ -669,14 +515,12 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     var canSummarizeSource: Bool {
-        !hasGeneratedMeetingSummary
-            && !isTranscriptSummaryLoading
+        !isTranscriptSummaryLoading
             && !subtitlesText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var canSummarizeTranslation: Bool {
-        !hasGeneratedMeetingSummary
-            && !isTranslationSummaryLoading
+        !isTranslationSummaryLoading
             && !translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -767,7 +611,11 @@ final class SubtitleViewModel: ObservableObject {
             await stopStreamingSession(markStopped: false, persistHistoryAsActive: false)
         }
 
-        await completeMeetingHistoryConversationIfNeeded()
+        guard await completeMeetingHistoryConversationIfNeeded() else {
+            throw MeetingSessionHistoryServiceError.graphqlRequestFailed(
+                "The current meeting could not be saved. Its local draft has been kept. Try again before starting a new meeting."
+            )
+        }
         resetMeetingHistoryState()
         clearCurrentSessionForNewSession()
     }
@@ -779,7 +627,9 @@ final class SubtitleViewModel: ObservableObject {
         status = .listening
         shouldShowMicrophoneOffWarning = !includeMicrophone
         meetingHistoryStartedAt = meetingHistoryStartedAt ?? Date()
+        meetingHistoryEndedAt = nil
         meetingHistorySource = includeMicrophone ? "system_audio+microphone" : "system_audio"
+        persistDraftIfNeeded()
         markBillingUsageStartedIfNeeded()
         scheduleMeetingHistorySessionStartIfNeeded()
 
@@ -816,7 +666,7 @@ final class SubtitleViewModel: ObservableObject {
                 await stopStreamingSession(markStopped: false, persistHistoryAsActive: false)
             }
 
-            await completeMeetingHistoryConversationIfNeeded()
+            guard await completeMeetingHistoryConversationIfNeeded() else { return }
             resetMeetingHistoryState()
             clearCurrentSessionForNewSession()
         }
@@ -864,7 +714,9 @@ final class SubtitleViewModel: ObservableObject {
                 try await ensureStreamingSessionStarted()
                 try await enableMicrophoneListening()
                 meetingHistoryStartedAt = meetingHistoryStartedAt ?? Date()
+                meetingHistoryEndedAt = nil
                 meetingHistorySource = "microphone"
+                persistDraftIfNeeded()
                 scheduleMeetingHistorySessionStartIfNeeded()
             } catch {
                 await mixedAudioStreamMixer.setMicrophoneEnabled(false)
@@ -901,6 +753,9 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     func toggleMicrophoneCapture() {
+        SpeecharaDiagnostics.session.notice(
+            "toggleMicrophoneCapture requested enabled=\(self.isMicrophoneListening) system=\(self.isSystemAudioListening) busy=\(self.isBusy) microphoneBusy=\(self.isMicrophoneBusy)"
+        )
         guard !isBusy, !isMicrophoneBusy else {
             return
         }
@@ -926,6 +781,10 @@ final class SubtitleViewModel: ObservableObject {
                     status = .listening
                 }
 
+                SpeecharaDiagnostics.session.notice(
+                    "microphone capture toggled enabled=false system=\(self.isSystemAudioListening)"
+                )
+
                 return
             }
 
@@ -933,8 +792,13 @@ final class SubtitleViewModel: ObservableObject {
                 try await ensureStreamingSessionStarted()
                 try await enableMicrophoneListening()
                 meetingHistoryStartedAt = meetingHistoryStartedAt ?? Date()
+                meetingHistoryEndedAt = nil
+                persistDraftIfNeeded()
                 meetingHistorySource = isSystemAudioListening ? "system_audio+microphone" : "microphone"
                 scheduleMeetingHistorySessionStartIfNeeded()
+                SpeecharaDiagnostics.session.notice(
+                    "microphone capture toggled enabled=true system=\(self.isSystemAudioListening) device=\(self.selectedMicrophoneName, privacy: .public)"
+                )
             } catch {
                 await mixedAudioStreamMixer.setMicrophoneEnabled(false)
                 stopMicrophoneCaptureIfPossible(force: true)
@@ -1039,7 +903,11 @@ final class SubtitleViewModel: ObservableObject {
         }
     }
 
-    func clearSubtitles() {
+    private func clearSubtitles() {
+        utteranceFinalizationTask?.cancel()
+        utteranceFinalizationTask = nil
+        stableReconstructionTask?.cancel()
+        stableReconstructionTask = nil
         sessionTurns = []
         transcriptEntries = []
         translationEntries = []
@@ -1099,9 +967,72 @@ final class SubtitleViewModel: ObservableObject {
         }
     }
 
-    private func completeMeetingHistoryConversationIfNeeded() async {
-        _ = await meetingHistorySaveTask?.result
-        await persistMeetingHistorySnapshot(status: .completed)
+    @discardableResult
+    private func completeMeetingHistoryConversationIfNeeded() async -> Bool {
+        guard meetingHistoryStartedAt != nil || meetingHistorySessionID != nil || !sessionTurns.isEmpty else {
+            return true
+        }
+        meetingHistoryAutosaveTask?.cancel()
+        meetingHistoryAutosaveTask = nil
+        let previousTask = meetingHistorySaveTask
+        let completion = Task { @MainActor [weak self] in
+            _ = await previousTask?.result
+            guard let self else { return false }
+            return await self.saveCompletedMeetingHistoryConversation()
+        }
+        meetingHistorySaveTask = Task { _ = await completion.value }
+        return await completion.value
+    }
+
+    private func saveCompletedMeetingHistoryConversation() async -> Bool {
+        meetingHistoryEndedAt = meetingHistoryEndedAt ?? sessionTurns.map(\.timestamp).max() ?? Date()
+        persistDraftIfNeeded()
+        // Save the transcript even if an unrelated speaking note cannot attach.
+        let initialStatus: MeetingSessionHistoryStatus = meetingHistoryLastCompletedSnapshotSignature == nil ? .active : .completed
+        guard await persistMeetingHistorySnapshot(status: initialStatus, preserveActiveStatus: true) else { return false }
+        let speakingNoteReady = await SpeakingNotesStore.shared.flushAndAttach(to: meetingHistorySessionID)
+        guard speakingNoteReady else {
+            handleMeetingHistorySyncError(SpeakingNotesServiceError(
+                message: SL("The meeting remains active in history because its speaking note could not be saved and attached."),
+                code: "SPEAKING_NOTE_ATTACH_FAILED"
+            ))
+            return false
+        }
+        guard await persistMeetingHistorySnapshot(status: .completed) else { return false }
+        SpeakingNotesStore.shared.setMeetingSessionID(nil)
+        return true
+    }
+
+    // Called after authentication is restored, and again when the app becomes active.
+    func resumeMeetingHistorySync() {
+        guard !sessionTurns.isEmpty || meetingHistorySessionID != nil else { return }
+        if hasActiveSession {
+            scheduleMeetingHistorySnapshotSync(status: .active)
+        } else {
+            scheduleMeetingHistoryWork { [weak self] in
+                _ = await self?.saveCompletedMeetingHistoryConversation()
+            }
+        }
+    }
+
+    func prepareForTermination() async {
+        // Checkpoint synchronously before waiting on audio or the network.
+        persistDraftIfNeeded()
+        if hasActiveSession {
+            await stopStreamingSession(markStopped: true, persistHistoryAsActive: false)
+        }
+        _ = await completeMeetingHistoryConversationIfNeeded()
+        persistDraftIfNeeded()
+    }
+
+    private func scheduleThrottledMeetingHistorySync(delay: UInt64 = 3_000_000_000) {
+        guard meetingHistoryAutosaveTask == nil else { return }
+        meetingHistoryAutosaveTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: delay) } catch { return }
+            guard let self else { return }
+            self.meetingHistoryAutosaveTask = nil
+            self.resumeMeetingHistorySync()
+        }
     }
 
     private func scheduleMeetingHistoryWork(_ operation: @escaping @MainActor () async -> Void) {
@@ -1122,64 +1053,77 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     private func ensureMeetingHistorySessionStartedIfNeeded() async {
-        guard meetingHistorySessionID == nil,
-              let snapshot = meetingHistorySnapshot(status: .active, allowEmptySession: true) else {
-            return
-        }
-
-        do {
-            let remoteState = try await meetingSessionHistoryService.startSession(snapshot: snapshot)
-            meetingHistorySessionID = remoteState.id
-            meetingHistorySessionRevision = remoteState.revision
-            meetingHistoryLastSavedSnapshotSignature = nil
-            meetingHistoryLastCompletedSnapshotSignature = nil
-        } catch {
-            handleMeetingHistorySyncError(error)
-        }
+        do { try await resolveMeetingHistorySession() }
+        catch { handleMeetingHistorySyncError(error) }
     }
 
-    private func persistMeetingHistorySnapshot(status: MeetingSessionHistoryStatus) async {
+    private func resolveMeetingHistorySession() async throws {
+        let authSession = try await AuthService.shared.activeSession()
+        if let owner = meetingHistoryAuthUserID, owner != authSession.user.id {
+            throw MeetingSessionHistoryServiceError.graphqlRequestFailed(
+                "This local meeting belongs to another account. Sign in to that account to sync it."
+            )
+        }
+        meetingHistoryAuthUserID = authSession.user.id
+        // Checkpoint the owner and start time before any request can be interrupted.
+        if meetingHistoryStartedAt == nil { meetingHistoryStartedAt = sessionTurns.map(\.timestamp).min() }
+        persistDraftIfNeeded()
+        if meetingHistorySessionID != nil, meetingHistorySessionRevision != nil { return }
+        guard let snapshot = meetingHistorySnapshot(status: .active, allowEmptySession: true) else { return }
+        let recovered = try await meetingSessionHistoryService.findRecoverableSession(
+            snapshot: snapshot, allowLegacyRecovery: meetingHistoryNeedsLegacyRecovery
+        )
+        let remoteState: MeetingSessionHistoryRemoteState
+        if let recovered {
+            remoteState = recovered
+            meetingHistoryStartedAt = recovered.startedAt ?? meetingHistoryStartedAt
+            meetingHistorySource = recovered.source ?? meetingHistorySource
+        } else {
+            remoteState = try await meetingSessionHistoryService.startSession(snapshot: snapshot)
+        }
+        meetingHistorySessionID = remoteState.id
+        meetingHistoryNeedsLegacyRecovery = false
+        meetingHistorySessionRevision = remoteState.revision
+        SpeakingNotesStore.shared.setMeetingSessionID(remoteState.id)
+        meetingHistoryLastSavedSnapshotSignature = nil
+        meetingHistoryLastCompletedSnapshotSignature = nil
+        persistDraftIfNeeded()
+    }
+
+    @discardableResult
+    private func persistMeetingHistorySnapshot(
+        status requestedStatus: MeetingSessionHistoryStatus,
+        preserveActiveStatus: Bool = false
+    ) async -> Bool {
+        // A queued active save must never reopen a meeting already stopped locally.
+        let status: MeetingSessionHistoryStatus = !preserveActiveStatus && !hasActiveSession && meetingHistoryEndedAt != nil
+            ? .completed : requestedStatus
         guard let snapshot = meetingHistorySnapshot(
             status: status,
             allowEmptySession: meetingHistoryStartedAt != nil || meetingHistorySessionID != nil
-        ) else {
-            return
-        }
+        ) else { return true }
 
         do {
-            if meetingHistorySessionID == nil || meetingHistorySessionRevision == nil {
-                let remoteState = try await meetingSessionHistoryService.startSession(snapshot: snapshot)
-                meetingHistorySessionID = remoteState.id
-                meetingHistorySessionRevision = remoteState.revision
-            }
-
-            guard let meetingHistorySessionID,
-                  let meetingHistorySessionRevision else {
-                return
-            }
-
+            try await resolveMeetingHistorySession()
+            guard let id = meetingHistorySessionID, let revision = meetingHistorySessionRevision else { return false }
             let lastSignature = status == .completed
-                ? meetingHistoryLastCompletedSnapshotSignature
-                : meetingHistoryLastSavedSnapshotSignature
-
-            guard lastSignature != snapshot.signature else {
-                return
-            }
-
+                ? meetingHistoryLastCompletedSnapshotSignature : meetingHistoryLastSavedSnapshotSignature
+            guard lastSignature != snapshot.signature else { return true }
             let remoteState = try await meetingSessionHistoryService.updateSession(
-                id: meetingHistorySessionID,
-                revision: meetingHistorySessionRevision,
-                snapshot: snapshot
+                id: id, revision: revision, snapshot: snapshot
             )
-
-            self.meetingHistorySessionRevision = remoteState.revision
-            if status == .completed {
-                meetingHistoryLastCompletedSnapshotSignature = snapshot.signature
-            } else {
-                meetingHistoryLastSavedSnapshotSignature = snapshot.signature
-            }
+            meetingHistorySessionRevision = remoteState.revision
+            if status == .completed { meetingHistoryLastCompletedSnapshotSignature = snapshot.signature }
+            else { meetingHistoryLastSavedSnapshotSignature = snapshot.signature }
+            persistDraftIfNeeded()
+            meetingHistoryRetryTask?.cancel()
+            meetingHistoryRetryTask = nil
+            if errorMessage?.hasPrefix("Meeting history sync failed:") == true { errorMessage = nil }
+            NotificationCenter.default.post(name: .speecharaMeetingHistoryDidChange, object: nil)
+            return true
         } catch {
             handleMeetingHistorySyncError(error)
+            return false
         }
     }
 
@@ -1207,8 +1151,9 @@ final class SubtitleViewModel: ObservableObject {
             ?? sessionTurns.map(\.timestamp).min()
             ?? Date()
 
-        let endedAt = status == .completed ? Date() : nil
-        let durationSeconds = max(0, Int((endedAt ?? Date()).timeIntervalSince(startedAt)))
+        let endedAt = status == .completed
+            ? (meetingHistoryEndedAt ?? sessionTurns.map(\.timestamp).max() ?? startedAt) : nil
+        let durationSeconds = max(0, Int((meetingHistoryEndedAt ?? endedAt ?? Date()).timeIntervalSince(startedAt)))
 
         return MeetingSessionHistorySnapshot(
             title: meetingHistoryTitle,
@@ -1216,8 +1161,8 @@ final class SubtitleViewModel: ObservableObject {
             endedAt: endedAt,
             durationSeconds: durationSeconds,
             status: status,
-            inputLanguage: selectedSourceLanguage.deepgramLanguageCode.lowercased(),
-            translationLanguage: isTranslationEnabled ? selectedTranslationLanguage.rawValue.lowercased() : nil,
+            inputLanguage: selectedSourceLanguage.deepgramLanguageCode,
+            translationLanguage: isTranslationEnabled ? selectedTranslationLanguage.languageCode : nil,
             translationEnabled: isTranslationEnabled,
             recordingEnabled: isAudioRecordingEnabled,
             microphoneLabel: selectedMicrophoneName.nilIfEmpty,
@@ -1230,7 +1175,8 @@ final class SubtitleViewModel: ObservableObject {
                 client: "macos",
                 source: meetingHistorySource,
                 appVersion: Self.currentAppVersion,
-                focusMode: focusModeEnabledForHistory
+                focusMode: focusModeEnabledForHistory,
+                localSessionID: meetingHistoryConversationGeneration.uuidString.lowercased()
             )
         )
     }
@@ -1273,7 +1219,7 @@ final class SubtitleViewModel: ObservableObject {
             return MeetingSessionTranslationBlock(
                 transcriptBlockId: transcriptBlock.id,
                 seq: transcriptBlock.seq,
-                language: selectedTranslationLanguage.rawValue.lowercased(),
+                language: selectedTranslationLanguage.languageCode,
                 text: text
             )
         }
@@ -1296,10 +1242,6 @@ final class SubtitleViewModel: ObservableObject {
         transcriptSummaryText.nilIfEmpty ?? translationSummaryText.nilIfEmpty
     }
 
-    private var hasGeneratedMeetingSummary: Bool {
-        preferredMeetingHistorySummaryText != nil
-    }
-
     private var preferredMeetingHistoryProtocolText: String? {
         transcriptProtocolText.nilIfEmpty ?? translationProtocolText.nilIfEmpty
     }
@@ -1311,8 +1253,16 @@ final class SubtitleViewModel: ObservableObject {
     private func resetMeetingHistoryState() {
         meetingHistoryConversationGeneration = UUID()
         meetingHistorySessionID = nil
+        SpeakingNotesStore.shared.setMeetingSessionID(nil)
         meetingHistorySessionRevision = nil
         meetingHistoryStartedAt = nil
+        meetingHistoryEndedAt = nil
+        meetingHistoryAuthUserID = nil
+        meetingHistoryNeedsLegacyRecovery = false
+        meetingHistoryAutosaveTask?.cancel()
+        meetingHistoryAutosaveTask = nil
+        meetingHistoryRetryTask?.cancel()
+        meetingHistoryRetryTask = nil
         meetingHistoryLastSavedSnapshotSignature = nil
         meetingHistoryLastCompletedSnapshotSignature = nil
         meetingHistorySource = "system_audio"
@@ -1322,14 +1272,16 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     private func handleMeetingHistorySyncError(_ error: Error) {
-        if let historyError = error as? MeetingSessionHistoryServiceError,
-           case .missingAuthSession = historyError {
-            return
-        }
-
         let message = "Meeting history sync failed: \(error.localizedDescription)"
-        if errorMessage != message {
-            errorMessage = message
+        SpeecharaDiagnostics.history.error("\(message, privacy: .public)")
+        errorMessage = message
+        persistDraftIfNeeded()
+        guard meetingHistoryRetryTask == nil else { return }
+        meetingHistoryRetryTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 15_000_000_000) } catch { return }
+            guard let self else { return }
+            self.meetingHistoryRetryTask = nil
+            self.resumeMeetingHistorySync()
         }
     }
 
@@ -1385,6 +1337,8 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     func updateTranscriptText(_ text: String) {
+        utteranceFinalizationTask?.cancel()
+        utteranceFinalizationTask = nil
         let parsedTurns = parseTranscriptEditorTurns(from: text)
         sessionTurns = parsedTurns
         nextStableTurnIndex = sessionTurns.filter(\.isClosed).count
@@ -1419,7 +1373,7 @@ final class SubtitleViewModel: ObservableObject {
             target: .source,
             transcript: subtitlesText,
             inputLanguageName: selectedSourceLanguage.deepSeekLanguageName,
-            outputLanguageName: selectedSourceLanguage.deepSeekLanguageName
+            outputLanguageName: sourceAIOutputLanguage.deepSeekTargetLanguageName
         )
     }
 
@@ -1436,7 +1390,7 @@ final class SubtitleViewModel: ObservableObject {
         startMeetingProtocol(
             target: .source,
             transcript: subtitlesText,
-            languageName: selectedSourceLanguage.deepSeekLanguageName
+            languageName: sourceAIOutputLanguage.deepSeekTargetLanguageName
         )
     }
 
@@ -1453,7 +1407,7 @@ final class SubtitleViewModel: ObservableObject {
             target: .source,
             transcript: transcriptForAnswerAssist(),
             inputLanguageName: selectedSourceLanguage.deepSeekLanguageName,
-            outputLanguageName: selectedSourceLanguage.deepSeekLanguageName
+            outputLanguageName: sourceAIOutputLanguage.deepSeekTargetLanguageName
         )
     }
 
@@ -1488,6 +1442,14 @@ final class SubtitleViewModel: ObservableObject {
 
     func hideTranslationAnswer() {
         isTranslationAnswerVisible = false
+    }
+
+    func copyTranscriptToPasteboard() {
+        copyToPasteboard(subtitlesText)
+    }
+
+    func copyTranslationToPasteboard() {
+        copyToPasteboard(translatedText)
     }
 
     func copyTranscriptSummaryToPasteboard() {
@@ -1544,6 +1506,16 @@ final class SubtitleViewModel: ObservableObject {
         NSPasteboard.general.setString(translationAnswerText, forType: .string)
     }
 
+    private func copyToPasteboard(_ text: String) {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else {
+            return
+        }
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(trimmedText, forType: .string)
+    }
+
     func decreaseTranslationFontSize() {
         translationFontSize = max(translationFontSize - Self.editorFontStep, Self.minimumEditorFontSize)
     }
@@ -1562,15 +1534,105 @@ final class SubtitleViewModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([recordingURL])
     }
 
+    func toggleAudioRecording() {
+        guard !isBusy else {
+            return
+        }
+
+        guard isStreamingSessionPrepared else {
+            isAudioRecordingEnabled.toggle()
+            return
+        }
+
+        isBusy = true
+        errorMessage = nil
+
+        Task { @MainActor in
+            defer {
+                isBusy = false
+            }
+
+            if isAudioRecordingEnabled {
+                do {
+                    await mixedAudioStreamMixer.drainRemainingAudio()
+                    let temporaryURL = try await localAudioRecordingService.finishRecording()
+                    isAudioRecordingEnabled = false
+                    if let temporaryURL,
+                       let savedURL = try promptToSaveRecording(at: temporaryURL) {
+                        lastRecordingPath = savedURL.path
+                    }
+                    scheduleMeetingHistorySnapshotSync(status: .active)
+                } catch {
+                    isAudioRecordingEnabled = false
+                    errorMessage = error.localizedDescription
+                }
+                return
+            }
+
+            do {
+                await mixedAudioStreamMixer.drainRemainingAudio()
+                try await localAudioRecordingService.startRecording(isEnabled: true)
+                isAudioRecordingEnabled = true
+                scheduleMeetingHistorySnapshotSync(status: .active)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func promptToSaveRecording(at temporaryURL: URL) throws -> URL? {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: temporaryURL.path) else {
+            return nil
+        }
+
+        let savePanel = NSSavePanel()
+        savePanel.title = SL("Save Recording")
+        savePanel.message = SL("Choose where to save the M4A recording.")
+        savePanel.nameFieldStringValue = temporaryURL.lastPathComponent
+        savePanel.allowedContentTypes = [.mpeg4Audio]
+        savePanel.canCreateDirectories = true
+        savePanel.isExtensionHidden = false
+
+        NSApp.activate(ignoringOtherApps: true)
+        guard savePanel.runModal() == .OK, let destinationURL = savePanel.url else {
+            try? fileManager.removeItem(at: temporaryURL)
+            return nil
+        }
+
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            try fileManager.removeItem(at: destinationURL)
+        }
+        try fileManager.moveItem(at: temporaryURL, to: destinationURL)
+        return destinationURL
+    }
+
     func setFocusModeEnabled(_ isEnabled: Bool) {
         focusModeEnabledForHistory = isEnabled
     }
 
     private func configureSystemAudioRouting() {
+        systemAudioCaptureService.setAudioLevelHandler { [weak self] level in
+            Task { @MainActor in
+                self?.applySystemAudioLevel(level)
+            }
+        }
         systemAudioCaptureService.setLiveAudioDataHandler { [mixedAudioStreamMixer] audioData in
             Task {
                 await mixedAudioStreamMixer.appendSystemAudio(audioData)
             }
+        }
+    }
+
+    private func applySystemAudioLevel(_ level: Double) {
+        systemAudioLevel = level
+        if level > 0.015 {
+            lastSystemAudioSignalDate = Date()
+            systemAudioSignalDetected = true
+        } else {
+            systemAudioSignalDetected = lastSystemAudioSignalDate.map {
+                Date().timeIntervalSince($0) < 1.25
+            } ?? false
         }
     }
 
@@ -1592,24 +1654,37 @@ final class SubtitleViewModel: ObservableObject {
     private func applyDeepgramEvent(_ event: DeepgramTranscriptEvent) {
         switch event {
         case .interim(let result):
+            let summary = SpeecharaDiagnostics.textSummary(result.transcript, limit: 180)
+            SpeecharaDiagnostics.transcription.debug(
+                "Deepgram interim speechFinal=\(result.speechFinal) text=\(summary, privacy: .public)"
+            )
             applyInterimTranscript(result.transcript)
         case .final(let result):
-            liveSubtitlePreview = ""
+            let summary = SpeecharaDiagnostics.textSummary(result.transcript, limit: 240)
+            SpeecharaDiagnostics.transcription.notice(
+                "Deepgram final speechFinal=\(result.speechFinal) text=\(summary, privacy: .public)"
+            )
             applyFinalTranscript(result.transcript, speechFinal: result.speechFinal)
         }
     }
 
     private func applyInterimTranscript(_ transcript: String) {
         let normalizedTranscript = normalizedTranscriptFragment(transcript)
-        liveSubtitlePreview = normalizedTranscript
-
-        guard isTranslationAvailable, !normalizedTranscript.isEmpty else {
+        guard !normalizedTranscript.isEmpty else {
             return
         }
 
+        utteranceFinalizationTask?.cancel()
         let turnID = ensureOpenTurn()
         let confirmedText = sessionTurns.first(where: { $0.id == turnID })?.text ?? ""
         let completeDraft = mergedText(existing: confirmedText, addition: normalizedTranscript)
+        liveSubtitlePreview = completeDraft
+        scheduleUtteranceFinalization(for: turnID)
+
+        guard isTranslationAvailable else {
+            return
+        }
+
         Task {
             await liveTranslationService.enqueueInterimChunk(completeDraft, turnID: turnID)
         }
@@ -1619,17 +1694,25 @@ final class SubtitleViewModel: ObservableObject {
         let normalizedTranscript = normalizedTranscriptFragment(transcript)
         guard !normalizedTranscript.isEmpty else {
             if speechFinal {
-                finalizeCurrentTurnIfNeeded()
+                lastDeepgramFinalTranscript = ""
+                scheduleUtteranceFinalizationForOpenTurn()
             }
             return
         }
 
+        utteranceFinalizationTask?.cancel()
+
         let delta = transcriptDelta(current: normalizedTranscript, previous: lastDeepgramFinalTranscript)
         lastDeepgramFinalTranscript = normalizedTranscript
+        if speechFinal {
+            // Close the transport-level ASR segment without closing the larger
+            // utterance block that the user sees in the transcript.
+            lastDeepgramFinalTranscript = ""
+        }
 
         guard !delta.isEmpty else {
             if speechFinal {
-                finalizeCurrentTurnIfNeeded()
+                scheduleUtteranceFinalizationForOpenTurn()
             }
             return
         }
@@ -1639,17 +1722,25 @@ final class SubtitleViewModel: ObservableObject {
         rebuildPublishedState()
         scheduleDraftAutosave()
 
-        let closesTurn = speechFinal || shouldFinalizeTurn(afterAppending: delta)
+        let currentTurnText = sessionTurns.first(where: { $0.id == turnID })?.text ?? delta
+        let closesTurn = shouldFinalizeTurn(afterAppending: delta)
+            || shouldFinalizeTurnForLength(currentTurnText)
 
         if isTranslationAvailable, !closesTurn {
-            let fullTurnText = sessionTurns.first(where: { $0.id == turnID })?.text ?? delta
+            liveSubtitlePreview = currentTurnText
             Task {
-                await liveTranslationService.enqueueInterimChunk(fullTurnText, turnID: turnID)
+                await liveTranslationService.enqueueInterimChunk(currentTurnText, turnID: turnID)
             }
         }
 
         if closesTurn {
+            liveSubtitlePreview = ""
             finalizeCurrentTurnIfNeeded()
+        } else {
+            if !isTranslationAvailable {
+                liveSubtitlePreview = currentTurnText
+            }
+            scheduleUtteranceFinalization(for: turnID)
         }
     }
 
@@ -1748,7 +1839,45 @@ final class SubtitleViewModel: ObservableObject {
         return [".", "!", "?", "…"].contains(lastCharacter)
     }
 
+    private func shouldFinalizeTurnForLength(_ text: String) -> Bool {
+        if text.count >= Self.maximumUtteranceCharacterCount {
+            return true
+        }
+
+        return text.split(whereSeparator: \Character.isWhitespace).count
+            >= Self.maximumUtteranceWordCount
+    }
+
+    private func scheduleUtteranceFinalizationForOpenTurn() {
+        guard let turnID = sessionTurns.last(where: { !$0.isClosed })?.id else {
+            return
+        }
+        scheduleUtteranceFinalization(for: turnID)
+    }
+
+    private func scheduleUtteranceFinalization(for turnID: UUID) {
+        utteranceFinalizationTask?.cancel()
+        utteranceFinalizationTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: Self.utterancePauseNanoseconds)
+            } catch {
+                return
+            }
+
+            guard !Task.isCancelled,
+                  let self,
+                  self.sessionTurns.last?.id == turnID,
+                  self.sessionTurns.last?.isClosed == false else {
+                return
+            }
+            self.finalizeCurrentTurnIfNeeded()
+        }
+    }
+
     private func finalizeCurrentTurnIfNeeded() {
+        utteranceFinalizationTask?.cancel()
+        utteranceFinalizationTask = nil
+        liveSubtitlePreview = ""
         guard let lastIndex = sessionTurns.indices.last, !sessionTurns[lastIndex].isClosed else {
             lastDeepgramFinalTranscript = ""
             return
@@ -1764,6 +1893,7 @@ final class SubtitleViewModel: ObservableObject {
 
         sessionTurns[lastIndex].text = trimmedText
         sessionTurns[lastIndex].isClosed = true
+        promotePendingTranslationDraftIfAvailable(turnID: sessionTurns[lastIndex].id, turnIndex: lastIndex)
 
         if isTranslationAvailable {
             let turnID = sessionTurns[lastIndex].id
@@ -1775,9 +1905,25 @@ final class SubtitleViewModel: ObservableObject {
         lastDeepgramFinalTranscript = ""
         rebuildPublishedState()
         scheduleDraftAutosave()
-        scheduleStableReconstructionIfNeeded()
+        // Deepgram's final result is the source of truth. A generative cleanup pass
+        // must never rewrite words that the user has already seen as final.
+    }
 
-        // Keep the latest draft visible until the final translation replaces it.
+    private func promotePendingTranslationDraftIfAvailable(turnID: UUID, turnIndex: Int) {
+        guard let draft = pendingTranslationDrafts.removeValue(forKey: turnID)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !draft.isEmpty else {
+            return
+        }
+
+        sessionTurns[turnIndex].translationText = draft
+        if translationPreviewTurnID == turnID {
+            translationPreviewTurnID = nil
+            liveTranslationPreview = ""
+        }
+        SpeecharaDiagnostics.translation.notice(
+            "promoted latest preview while final translation is pending turn=\(turnID.uuidString)"
+        )
     }
 
     private func prepareTranslationIfPossible(for generation: UUID) async {
@@ -2050,6 +2196,9 @@ final class SubtitleViewModel: ObservableObject {
         }
 
         isSystemAudioListening = false
+        systemAudioLevel = 0
+        systemAudioSignalDetected = false
+        lastSystemAudioSignalDate = nil
 
         if !hasActiveAudioSource {
             await stopStreamingSession(markStopped: markStopped)
@@ -2066,7 +2215,11 @@ final class SubtitleViewModel: ObservableObject {
     private func stopStreamingSession(markStopped: Bool, persistHistoryAsActive: Bool = true) async {
         SpeecharaDiagnostics.session.notice("stopStreamingSession begin markStopped=\(markStopped) persistHistoryAsActive=\(persistHistoryAsActive) prepared=\(self.isStreamingSessionPrepared) system=\(self.isSystemAudioListening) mic=\(self.isMicrophoneListening)")
         var stopError: Error?
+        meetingHistoryEndedAt = meetingHistoryEndedAt ?? Date()
+        persistDraftIfNeeded()
 
+        stableReconstructionTask?.cancel()
+        stableReconstructionTask = nil
         translationPreparationTask?.cancel()
         translationPreparationTask = nil
         streamingSessionGeneration = UUID()
@@ -2089,6 +2242,10 @@ final class SubtitleViewModel: ObservableObject {
 
         isSystemAudioListening = false
         systemAudioCaptureService.setLiveAudioDataHandler(nil)
+        systemAudioCaptureService.setAudioLevelHandler(nil)
+        systemAudioLevel = 0
+        systemAudioSignalDetected = false
+        lastSystemAudioSignalDate = nil
 
         if isStreamingSessionPrepared {
             try? await Task.sleep(nanoseconds: 50_000_000)
@@ -2117,7 +2274,18 @@ final class SubtitleViewModel: ObservableObject {
         await mixedAudioStreamMixer.reset()
         isTranslationAvailable = false
         isStreamingSessionPrepared = false
-        lastRecordingPath = outputURL?.path
+        if let outputURL {
+            do {
+                if let savedURL = try promptToSaveRecording(at: outputURL) {
+                    lastRecordingPath = savedURL.path
+                }
+            } catch {
+                if stopError == nil {
+                    stopError = error
+                }
+                try? FileManager.default.removeItem(at: outputURL)
+            }
+        }
         liveSubtitlePreview = ""
         liveTranslationPreview = ""
         pendingTranslationDrafts.removeAll()
@@ -2125,9 +2293,12 @@ final class SubtitleViewModel: ObservableObject {
         lastDeepgramFinalTranscript = ""
         scheduleBillingUsageEventSyncIfNeeded()
         status = markStopped ? .stopped : .idle
-        scheduleDraftAutosave()
+        persistDraftIfNeeded()
         if persistHistoryAsActive {
-            scheduleMeetingHistorySnapshotSync(status: .active)
+            scheduleMeetingHistoryWork { [weak self] in
+                guard let self else { return }
+                _ = await self.saveCompletedMeetingHistoryConversation()
+            }
         }
 
         if let stopError {
@@ -2140,6 +2311,7 @@ final class SubtitleViewModel: ObservableObject {
         translationPreparationTask = nil
         streamingSessionGeneration = UUID()
         systemAudioCaptureService.setLiveAudioDataHandler(nil)
+        systemAudioCaptureService.setAudioLevelHandler(nil)
         resetMicrophoneService()
         await liveDeepgramService.stop()
         await liveTranslationService.resetSession()
@@ -2152,6 +2324,9 @@ final class SubtitleViewModel: ObservableObject {
         }
         isStreamingSessionPrepared = false
         isSystemAudioListening = false
+        systemAudioLevel = 0
+        systemAudioSignalDetected = false
+        lastSystemAudioSignalDate = nil
         isMicrophoneCaptureActive = false
         isMicrophoneListening = false
         isMicrophoneTesting = false
@@ -2173,15 +2348,23 @@ final class SubtitleViewModel: ObservableObject {
     private func applyTranslationEvent(_ event: DeepSeekTranslationEvent) {
         switch event {
         case .preview(let turnID, let translation):
+            guard isTranslationOutputCompatible(translation, kind: "preview", turnID: turnID) else {
+                return
+            }
             if let turn = sessionTurns.first(where: { $0.id == turnID }),
-               turn.isClosed,
-               !turn.translationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+               turn.isClosed {
+                SpeecharaDiagnostics.translation.debug(
+                    "ignored late preview for closed turn=\(turnID.uuidString)"
+                )
                 return
             }
             pendingTranslationDrafts[turnID] = translation
             translationPreviewTurnID = turnID
-            liveTranslationPreview = timestampedTranslationPreview(translation, turnID: turnID)
+            liveTranslationPreview = translation.trimmingCharacters(in: .whitespacesAndNewlines)
         case .completed(let turnID, let translation):
+            guard isTranslationOutputCompatible(translation, kind: "final", turnID: turnID) else {
+                return
+            }
             pendingTranslationDrafts.removeValue(forKey: turnID)
             if translationPreviewTurnID == turnID {
                 translationPreviewTurnID = nil
@@ -2203,6 +2386,25 @@ final class SubtitleViewModel: ObservableObject {
                 await finalTranslationService.resetSession()
             }
         }
+    }
+
+    private func isTranslationOutputCompatible(
+        _ translation: String,
+        kind: String,
+        turnID: UUID
+    ) -> Bool {
+        let targetCode = selectedTranslationLanguage.languageCode
+        guard SpeecharaTranslationOutputValidator.isCompatible(
+            translation,
+            targetLanguageCode: targetCode
+        ) else {
+            let summary = SpeecharaDiagnostics.textSummary(translation, limit: 120)
+            SpeecharaDiagnostics.translation.error(
+                "rejected \(kind, privacy: .public) translation with unexpected script turn=\(turnID.uuidString, privacy: .public) target=\(targetCode, privacy: .public) output=\(summary, privacy: .public)"
+            )
+            return false
+        }
+        return true
     }
 
     private func applyCompletedTranslationChunk(_ translation: String, to turnID: UUID) {
@@ -2300,6 +2502,9 @@ final class SubtitleViewModel: ObservableObject {
         resetSpeakerNumbering()
 
         transcriptEntries = sessionTurns.compactMap { turn in
+            guard turn.isClosed else {
+                return nil
+            }
             let text = turn.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else {
                 return nil
@@ -2314,6 +2519,9 @@ final class SubtitleViewModel: ObservableObject {
         }
 
         translationEntries = sessionTurns.compactMap { turn in
+            guard turn.isClosed else {
+                return nil
+            }
             let committedTranslation = restoredPlainTranslationText(for: turn)
             guard !committedTranslation.isEmpty else {
                 return nil
@@ -2337,17 +2545,6 @@ final class SubtitleViewModel: ObservableObject {
             useDialogueLabels: showsTranslationDialogueMode,
             includeTimestamps: true
         )
-    }
-
-    private func timestampedTranslationPreview(_ translation: String, turnID: UUID) -> String {
-        let text = translation.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else {
-            return ""
-        }
-        guard let turn = sessionTurns.first(where: { $0.id == turnID }) else {
-            return text
-        }
-        return "[\(Self.transcriptTimestampFormatter.string(from: turn.timestamp))] \(text)"
     }
 
     private func restoredPlainTranslationText(for turn: SessionTurn) -> String {
@@ -2514,6 +2711,9 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     private func performStableReconstructionIfNeeded() async {
+        guard isStreamingSessionPrepared, !Task.isCancelled else {
+            return
+        }
         if !pendingTranslationDrafts.isEmpty || !liveTranslationPreview.isEmpty {
             scheduleStableReconstructionIfNeeded()
             return
@@ -2533,7 +2733,9 @@ final class SubtitleViewModel: ObservableObject {
                 reconstructedTurns = try await translatedStableTurns(reconstructedTurns)
             }
 
-            guard stableWindowStillMatches(signature: signature, range: selection.range) else {
+            guard isStreamingSessionPrepared,
+                  !Task.isCancelled,
+                  stableWindowStillMatches(signature: signature, range: selection.range) else {
                 return
             }
 
@@ -2755,13 +2957,8 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     private func scheduleDraftAutosave() {
-        draftAutosaveTask?.cancel()
-        draftAutosaveTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: Self.autosaveIntervalNanoseconds)
-            await MainActor.run {
-                self?.persistDraftIfNeeded()
-            }
-        }
+        persistDraftIfNeeded()
+        scheduleThrottledMeetingHistorySync()
     }
 
     private func persistDraftIfNeeded() {
@@ -2796,6 +2993,24 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     private func applyDraft(_ draft: SessionDraft) {
+        if let history = draft.history {
+            meetingHistorySessionID = history.sessionID
+            meetingHistorySessionRevision = history.revision
+            meetingHistoryStartedAt = history.startedAt
+            meetingHistoryEndedAt = history.endedAt ?? draft.turns.map(\.timestamp).max()
+            meetingHistorySource = history.source
+            meetingHistoryConversationGeneration = history.conversationID
+            meetingHistoryAuthUserID = history.authUserID
+            meetingHistoryNeedsLegacyRecovery = history.needsLegacyRecovery ?? false
+            selectedSourceLanguage = SourceLanguageOption.supported(code: history.inputLanguage) ?? selectedSourceLanguage
+            selectedTranslationLanguage = TranslationLanguageOption.supported(code: history.translationLanguage) ?? selectedTranslationLanguage
+            isTranslationEnabled = history.translationEnabled
+            isAudioRecordingEnabled = history.recordingEnabled
+        } else {
+            meetingHistoryNeedsLegacyRecovery = true
+            meetingHistoryStartedAt = draft.turns.map(\.timestamp).min()
+            meetingHistoryEndedAt = draft.turns.map(\.timestamp).max()
+        }
         resetSpeakerNumbering()
         sessionTurns = draft.turns.map { turn in
             if let label = turn.speakerLabel {
@@ -2826,23 +3041,27 @@ final class SubtitleViewModel: ObservableObject {
     }
 
     private func draftFingerprint() -> String {
-        [
-            subtitlesText,
-            translatedText,
-            transcriptSummaryText,
-            translationSummaryText,
-            transcriptProtocolText,
-            translationProtocolText,
-            transcriptAnswerText,
-            translationAnswerText,
-            sessionTurns.map(\.text).joined(separator: "|"),
-            sessionTurns.map(\.translationText).joined(separator: "|"),
-        ]
-        .joined(separator: "||")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return String(decoding: (try? encoder.encode(makeSessionDraft())) ?? Data(), as: UTF8.self)
     }
 
     private func makeSessionDraft() -> SessionDraft {
         SessionDraft(
+            history: MeetingHistoryCheckpoint(
+                sessionID: meetingHistorySessionID,
+                revision: meetingHistorySessionRevision,
+                startedAt: meetingHistoryStartedAt,
+                endedAt: meetingHistoryEndedAt,
+                source: meetingHistorySource,
+                conversationID: meetingHistoryConversationGeneration,
+                authUserID: meetingHistoryAuthUserID,
+                needsLegacyRecovery: meetingHistoryNeedsLegacyRecovery,
+                inputLanguage: selectedSourceLanguage.deepgramLanguageCode,
+                translationLanguage: selectedTranslationLanguage.languageCode,
+                translationEnabled: isTranslationEnabled,
+                recordingEnabled: isAudioRecordingEnabled
+            ),
             turns: sessionTurns.map { turn in
                 SessionDraft.DraftTurn(
                     id: turn.id,
@@ -2891,7 +3110,7 @@ final class SubtitleViewModel: ObservableObject {
         let topics = Array(lines.prefix(8))
 
         return [
-            "Meeting Protocol",
+            "Meeting Notes",
             "",
             "1. Topics Discussed",
             topics.map { "- \($0)" }.joined(separator: "\n"),
@@ -2964,9 +3183,19 @@ final class SubtitleViewModel: ObservableObject {
               !isTranscriptProtocolLoading,
               !isTranslationProtocolLoading,
               !isTranscriptAnswerLoading,
-              !isTranslationAnswerLoading,
-              !hasGeneratedMeetingSummary else {
+              !isTranslationAnswerLoading else {
             return
+        }
+
+        switch target {
+        case .source where !transcriptSummaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
+            isTranscriptSummaryVisible = true
+            return
+        case .translation where !translationSummaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
+            isTranslationSummaryVisible = true
+            return
+        default:
+            break
         }
 
         let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3105,10 +3334,10 @@ final class SubtitleViewModel: ObservableObject {
                 switch target {
                 case .source:
                     transcriptProtocolText = fallback
-                    transcriptProtocolErrorMessage = "AI protocol failed, showing a local fallback instead."
+                    transcriptProtocolErrorMessage = "AI meeting notes failed, showing a local fallback instead."
                 case .translation:
                     translationProtocolText = fallback
-                    translationProtocolErrorMessage = "AI protocol failed, showing a local fallback instead."
+                    translationProtocolErrorMessage = "AI meeting notes failed, showing a local fallback instead."
                 }
                 scheduleMeetingHistorySnapshotSync(status: .active)
             }
